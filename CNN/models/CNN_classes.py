@@ -281,7 +281,7 @@ class Layer_Dense:
         #Gradient on values
         self.dinputs = np.dot(dvalues, self.weights.T)
 
-        self.dinputs
+        #self.dinputs
 
     def get_parameters(self):
         #pass We'll let Model call this function 
