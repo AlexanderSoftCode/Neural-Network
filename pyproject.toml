@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aether-ml"
+version = "0.1.0"
+requires-python  = ">= 3.14"
+dependencies = [
+    "numpy", 
+    "matplotlib"
+]
+
+[project.optional-dependencies]
+gpu-nvidia = ["cupy-cuda12x"]   # CuPy wheel from PyPI
+gpu-amd = []                    # CuPy compiled inside aether-rocm.Dockerfile
+
+[tool.setuptools.packages.find]
+where = ["."]
+exclude = [".env*", "tests*", "*.egg-info"]

@@ -1,0 +1,41 @@
+{
+    "name": "Aether-ML Dev Environment (Python 3.14 + ROCm)",
+    
+    // 1. Point dynamically to your custom compiler Dockerfile layout
+    "build": {
+        "dockerfile": "aether-rocm.Dockerfile",
+        "context": ".."
+    },
+
+    // 2. Pass runtime hardware parameters to expose your RX 9070 XT (gfx1201)
+    "runArgs": [
+        "--device=/dev/kfd",
+        "--device=/dev/dri",
+        "--group-add=video",
+        "--shm-size=16G"
+    ],
+
+    // 3. Keep repository workspace directories mapped cleanly into the /app route
+    "workspaceMount": "source=${localWorkspaceFolder},target=/app,type=bind",
+    "workspaceFolder": "/app",
+
+    // 4. Combine automation settings and ML extensions for full IDE support
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "ms-python.python",
+                "ms-toolsai.jupyter",
+                "ms-azuretools.vscode-docker"
+            ],
+            "settings": {
+                "python.formatting.provider": "black"
+            }
+        }
+    },
+
+    // 5. Automated post-creation cleanup within the 3.14 environment boundaries
+    "postCreateCommand": "pip install --upgrade pip",
+
+    // 6. Ensure root execution access across system container volumes
+    "remoteUser": "root"
+}

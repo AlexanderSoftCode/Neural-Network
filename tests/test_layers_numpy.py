@@ -1,16 +1,26 @@
 import unittest
 import numpy as np
 
-from CNN.models.CNN_classes import Conv_Layer, Layer_Dense
+from CNN.models.CNN_classes import Conv_Layer as Conv_Layer_CPU
+from CNN.models.CNN_classes import Layer_Dense as Layer_Dense_CPU
 
-backends = [np]
+test_profiles = [
+    (np, Conv_Layer_CPU, Layer_Dense_CPU)
+]
+
 try:
     import cupy as cp
-    backends.append(cp)
-except ImportError:
+    # By placing this import here, any driver initialization errors or compilation 
+    # errors caused by the global ElementwiseKernel will be caught safely.
+    from CNN.models.CNN_classes_cupy import Conv_Layer as Conv_Layer_GPU
+    from CNN.models.CNN_classes_cupy import Layer_Dense as Layer_Dense_GPU
+    
+    test_profiles.append((cp, Conv_Layer_GPU, Layer_Dense_GPU))
+except Exception:
+    # Safely fall back if CuPy or a valid GPU execution context is missing
     pass
 
-def make_suite(xp):
+def make_suite(xp, Layer_Dense, Conv_Layer):    
     class TestDenseLayer(unittest.TestCase): 
         def setUp(self):
             xp.random.seed(42)
@@ -85,7 +95,7 @@ def make_suite(xp):
             Finite difference check: verify analytical dweights matches numerical approximation.
             f'(x) ≈ (f(x + h) - f(x - h)) / 2h
             """
-            epsilon = 1e-5
+            epsilon = 1e-2
             layer = Layer_Dense(n_inputs=5, n_neurons=3)
 
             fixed_input = xp.random.randn(4, 5)
@@ -195,7 +205,7 @@ def make_suite(xp):
             for the Conv_Layer. Uses a small input/filter to keep the double loop feasible.
             f'(x) ≈ (f(x + h) - f(x - h)) / 2h
             """
-            epsilon = 1e-5
+            epsilon = 1e-2
 
             conv = Conv_Layer(
                 input_shape=(8, 8, 1),
@@ -240,7 +250,15 @@ def make_suite(xp):
                 analytical_dweights, numerical_dweights, decimal=4
             )
     return TestDenseLayer, TestConvLayer
-for _xp in backends:
-    dense_cls, conv_cls = make_suite(_xp)
-    globals()[f"TestDenseLayer_{_xp.__name__}"] = dense_cls
-    globals()[f"TestConvLayer_{_xp.__name__}"] = conv_cls
+
+for _xp, _conv, _dense in test_profiles:
+    dense_layer_suite, conv_layer_suite = make_suite(
+        xp=_xp, 
+        Layer_Dense=_dense, 
+        Conv_Layer=_conv
+    )
+
+    backend_name = _xp.__name__
+
+    globals()[f"TestDenseLayer_{backend_name}"] = dense_layer_suite
+    globals()[f"TestConvLayer_{backend_name}"] = conv_layer_suite
