@@ -1,39 +1,6 @@
 import cupy as cp 
 from cupy.lib.stride_tricks import as_strided
 
-scatter_contributions_kernel = cp.ElementwiseKernel(
-    in_params='''
-        float32 contribution, 
-        int32 S, int32 H_out, int32 W_out,
-        int32 fH, int32 fW, int32 C_in,
-        int32 H_padded, int32 W_padded,
-        int32 sH, int32 sW
-    ''',
-    out_params='raw float32 padded_dinputs',
-    operation=r'''
-        // i is the linear index into contributions array
-        // Decode: (s, h_out, w_out, fh, fw, c_in)
-        int c_in = i % C_in;
-        int fw = (i / C_in) % fW;
-        int fh = (i / (C_in * fW)) % fH;
-        int w_out = (i / (C_in * fW * fH)) % W_out;
-        int h_out = (i / (C_in * fW * fH * W_out)) % H_out;
-        int s = i / (C_in * fW * fH * W_out * H_out);
-        
-        // Calculate target position in padded_dinputs
-        int h_target = h_out * sH + fh;
-        int w_target = w_out * sW + fw;
-        
-        // Calculate linear index in padded_dinputs
-        int target_idx = ((s * H_padded + h_target) * W_padded + w_target) * C_in + c_in;
-        
-        // Atomic add to handle overlaps
-        // 'contribution' (singular) is the current element value
-        atomicAdd(&padded_dinputs[target_idx], contribution);
-    ''',
-    name='scatter_contributions'
-)
-
 class Conv_Layer:
     def __init__(self, input_shape, num_filters = 1, filter_size = (3, 3), strides = (1, 1), padding = "same"):
 
@@ -76,13 +43,15 @@ class Conv_Layer:
         
         #Creating padding depending on padding = same, or padding = valid
         if self.padding == "same":
-            P = (self.filter_size[0] - 1) // 2
+            self.forward_pad_h = (self.filter_size[0] - 1) // 2
+            self.forward_pad_w = (self.filter_size[1] - 1) // 2
         else:            
-            P = 0
+            self.forward_pad_h = 0
+            self.forward_pad_w = 0
 
         #We need integer output dimensions, so cast equations to int
-        H_out = int((H_in + 2 * P - self.filter_size[0]) / self.strides[0] + 1)
-        W_out = int((W_in + 2 * P - self.filter_size[1]) / self.strides[1] + 1)
+        H_out = int((H_in + 2 * self.forward_pad_h - self.filter_size[0]) / self.strides[0] + 1)
+        W_out = int((W_in + 2 * self.forward_pad_w - self.filter_size[1]) / self.strides[1] + 1)
         
         #(0, 0) -> don't touch the number of samples in the batch
         #(P, P) -> pad top and bottom pixels by P pixels (axis 1)
@@ -90,7 +59,7 @@ class Conv_Layer:
         #(0, 0) -> don't pad depth. 
         #contstant -> add constant_values for the padded values
         padded_inputs = cp.pad(array = inputs, 
-                            pad_width = ((0, 0), (P, P), (P, P), (0, 0)),
+                            pad_width = ((0, 0), (self.forward_pad_h, self.forward_pad_h), (self.forward_pad_w, self.forward_pad_w), (0, 0)),
                             mode = 'constant',
                             constant_values = 0).astype(cp.float32, copy = False)
 
@@ -120,45 +89,58 @@ class Conv_Layer:
         return self.output
         #save the output tensor using self. for backpropogation
 
+    
     def backward(self, dvalues):
 
         #extract dvalues dimensions
         S, H_out, W_out, C_out = dvalues.shape
         fH, fW, C_in, C_out = self.filter_weights.shape
         sH, sW = self.strides
-        H_padded, W_padded = self.padded_inputs.shape[1:3]
+        _, H_in, W_in, _ = self.inputs.shape 
 
-        #dbiases has shape c_out as we intend to add dvalues to each filter. 
-        self.dbiases = cp.sum(dvalues, axis = (0 , 1, 2)) 
+        #Now we need to account for dbiases and dweights
+
+        self.dbiases = cp.sum(dvalues, axis = [0, 1, 2])
+
+        self.dweights = cp.tensordot(self.patches, dvalues, axes = ([0, 1, 2], [0, 1, 2]))
+
+        dilated_H = (H_out - 1) * sH + 1
+        dilated_W = (W_out - 1) * sW + 1 
         
-        self.dweights = cp.einsum("shwxyc, shwd -> xycd", self.patches, dvalues)
+        dvalues_dilated = cp.zeros(shape= (S, dilated_H, dilated_W, C_out), dtype= dvalues.dtype)
+        # Inject values using step slices
+        dvalues_dilated[:, ::sH, ::sW, :] = dvalues
+        
+        # padding 
+        if self.padding == "same": 
+            backward_pad_h = (fH - 1) - self.forward_pad_h
+            backward_pad_w = (fW - 1) - self.forward_pad_w
+        if self.padding == "valid": 
+            backward_pad_h = (fH - 1)
+            backward_pad_w = (fW - 1)
+        
+        dvalues_padded = cp.pad(dvalues_dilated, pad_width= ((0, 0), (backward_pad_h, backward_pad_h), (backward_pad_w, backward_pad_w), (0, 0)))
 
-        padded_dinputs = cp.zeros_like(self.padded_inputs, dtype = cp.float32)
-
-        contributions = cp.einsum("shwd, xycd -> shwxyc", dvalues, self.filter_weights)
-
-        contributions = contributions.astype(cp.float32)
-        scatter_contributions_kernel(
-            contributions.ravel(),
-            S, H_out, W_out, fH, fW, C_in,
-            H_padded, W_padded, sH, sW,
-            padded_dinputs.ravel()
+        # flip the values in the fH and fW dimensions, leave C_in and C_out dimensions alone
+        flipped_weights = self.filter_weights[::-1, ::-1, :, :]
+        dvalues_patches = as_strided(dvalues_padded, 
+                            shape = (S, H_in, W_in, fH, fW, C_out),
+                            strides=(
+                                dvalues_padded.strides[0],  # Batch step
+                                dvalues_padded.strides[1],  # Window grid row step (backward stride = 1)
+                                dvalues_padded.strides[2],  # Window grid col step (backward stride = 1)
+                                dvalues_padded.strides[1],  # Internel window pixel row step
+                                dvalues_padded.strides[2],  # Internel window pixel col step
+                                dvalues_padded.strides[3]   # Output channel step
+                            ))
+    
+        self.dinputs = cp.tensordot(
+            dvalues_patches, 
+            flipped_weights, 
+            axes=([3, 4, 5], [0, 1, 3]) # Match fH, fW, C_out
         )
 
-        #truncate our borders 
-        if self.padding == "same":
-            P = (fH - 1) // 2
-            self.dinputs = padded_dinputs[:, P:-P, P:-P, :] 
-        else:
-            self.dinputs = padded_dinputs 
         return self.dinputs
-    
-    def get_parameters(self):
-        return self.filter_weights, self.biases
-
-    def set_parameters(self, weights, biases):
-        self.filter_weights = weights
-        self.biases = biases
 
 scatter_avg_pooling_kernel = cp.ElementwiseKernel(
     in_params='''

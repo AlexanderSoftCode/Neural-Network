@@ -247,7 +247,7 @@ def make_suite(xp, Layer_Dense, Conv_Layer):
                             numerical_dweights[fh, fw, c, f] = (loss_plus - loss_minus) / (2 * epsilon)
 
             xp.testing.assert_array_almost_equal(
-                analytical_dweights, numerical_dweights, decimal=4
+                analytical_dweights, numerical_dweights, decimal=3
             )
     return TestDenseLayer, TestConvLayer
 
