@@ -141,56 +141,15 @@ class Conv_Layer:
         )
 
         return self.dinputs
+class Pooling:
 
-scatter_avg_pooling_kernel = cp.ElementwiseKernel(
-    in_params='''
-        float32 dval,
-        int32 S, int32 H_out, int32 W_out, int32 C,
-        int32 H_in, int32 W_in,
-        int32 fH, int32 fW,
-        int32 sH, int32 sW
-    ''',
-    out_params='raw float32 dinputs',
-    operation=r'''
-        // i is the linear index into dvalues
-        // Decode: (s, h_out, w_out, c)
-        int c = i % C;
-        int w_out = (i / C) % W_out;
-        int h_out = (i / (C * W_out)) % H_out;
-        int s = i / (C * W_out * H_out);
-        
-        // Gradient to distribute to each position in the pool
-        float grad_per_position = dval / (fH * fW);
-        
-        // Calculate starting position in input
-        int h_start = h_out * sH;
-        int w_start = w_out * sW;
-        
-        // Distribute gradient to all positions in this pool window
-        for (int fh = 0; fh < fH; fh++) {
-            for (int fw = 0; fw < fW; fw++) {
-                int h_in = h_start + fh;
-                int w_in = w_start + fw;
-                
-                // Calculate linear index in dinputs
-                int target_idx = ((s * H_in + h_in) * W_in + w_in) * C + c;
-                
-                // Atomic add to handle overlapping windows
-                atomicAdd(&dinputs[target_idx], grad_per_position);
-            }
-        }
-    ''',
-    name='scatter_avg_pooling'
-)
-
-class Pooling: 
     def __init__(self, filter_size = (2, 2), strides = (2, 2),
                   padding = "valid", pooling_type = "max"):
         self.filter_size = filter_size
         self.strides = strides
         self.padding = padding
         self.pooling_type = pooling_type
-
+        
     def forward(self, inputs, training):
         #Inputs should be of shape (S, H_in, W_in, C = D_in) 
         inputs = inputs.astype(cp.float32, copy = False)
@@ -204,15 +163,20 @@ class Pooling:
         if padding == "valid":
             H_out = int(cp.floor((H_in - fH) / sH + 1).item())
             W_out = int(cp.floor((W_in - fW) / sW + 1).item())
-        
+
+            self.pad_top, self.pad_bottom, self.pad_left, self.pad_right = 0, 0, 0, 0
         elif padding == "same":
+            
+            H_out = int(cp.ceil(H_in / sH).item())
+            W_out = int(cp.ceil(W_in / sW).item())
+
             pad_h = max((H_out - 1) * sH + fH - H_in, 0)
             pad_w = max((W_out - 1) * sW + fW - W_in, 0)
-            pad_top = pad_h // 2
-            pad_bottom = pad_h - pad_top
-            pad_left = pad_w // 2
-            pad_right = pad_w - pad_left
-            inputs = cp.pad(inputs, ((0,0), (pad_top,pad_bottom), (pad_left,pad_right), (0,0)), mode='constant')
+            self.pad_top = pad_h // 2
+            self.pad_bottom = pad_h - self.pad_top
+            self.pad_left = pad_w // 2
+            self.pad_right = pad_w - self.pad_left
+            inputs = cp.pad(inputs, ((0,0), (self.pad_top,self.pad_bottom), (self.pad_left,self.pad_right), (0,0)), mode='constant')
         else: 
             raise ValueError(f"Expected padding == valid or same, recieved {padding} instead")
 
@@ -251,48 +215,126 @@ class Pooling:
             
         #Store both of these for backprop
         self.inputs = inputs
-        self.output = pooled
-        return self.output
-
+        output = pooled
+        return output
+    
     def backward(self, dvalues):
-        
-        dvalues = dvalues.astype(cp.float32, copy = False)
-        #We want the same shape as self.inputs, we'll populate the tensor with zeros at first then unpool later.
-        self.dinputs = cp.zeros_like(self.inputs, dtype=cp.float32)
-        S, H_out, W_out, C = dvalues.shape
-        H_in, W_in = self.inputs.shape[1:3]
-        fH, fW = self.filter_size
-        sH, sW = self.strides
-        
-        if self.pooling_type == "max":
-            max_rows, max_cols = self.max_indicies
-            
-            s_idx = cp.arange(S)[:, None, None, None]      # Shape: (S, 1, 1, 1)
-            h_idx = cp.arange(H_out)[None, :, None, None]  # Shape: (1, H_out, 1, 1)
-            w_idx = cp.arange(W_out)[None, None, :, None]  # Shape: (1, 1, W_out, 1)
-            c_idx = cp.arange(C)[None, None, None, :]      # Shape: (1, 1, 1, C)
-            
-            # Calculate where in the input each gradient should go
-            # Broadcasting creates arrays of shape (S, H_out, W_out, C)
-            input_h = h_idx * sH + max_rows  # h_idx broadcasts, max_rows is already (S, H_out, W_out, C)
-            input_w = w_idx * sW + max_cols
-            
-            # Accumulate gradients at the right positions
-            # cp.add.at handles if multiple output positions map to same input position
-            cp.add.at(self.dinputs, (s_idx, input_h, input_w, c_idx), dvalues)
-        
-        elif self.pooling_type == "average":
-            
-            scatter_avg_pooling_kernel(
-                dvalues.ravel(),
-                S, H_out, W_out, C,
-                H_in, W_in, 
-                fH, fW,
-                sH, sW,
-                self.dinputs.ravel()
-            )
-        return self.dinputs
 
+        S, H_out, W_out, C = dvalues.shape
+        fH, fW, sH, sW = self.filter_size, self.strides
+        _, H_in, W_in, _ = self.inputs.shape
+
+        if self.padding == "valid":
+            pad_top = pad_bottom = pad_left = pad_right = 0
+            padded_H, padded_W = H_in, W_in
+        elif self.padding == "same":
+                
+            pad_top = self.pad_top
+            pad_bottom = self.pad_bottom
+            pad_left = self.pad_left
+            pad_right = self.pad_right
+
+            padded_H = H_in + pad_top + pad_bottom
+            padded_W = W_in + pad_left + pad_right
+
+        if self.pooling_type == "max":
+            if self.strides == self.filter_size:    # Non-overlapping windows
+                
+                dinputs_padded = cp.zeros((S, padded_H, padded_W, C), dtype=dvalues.dtype)
+                #compute non-overlapping windows
+                inputs = self.inputs
+                patches = as_strided(
+                    inputs,
+                    shape = (S, H_out, W_out, fH, fW, C), 
+                    strides = (
+                        inputs.strides[0],      # Step between samples
+                        inputs.strides[1] * sH, # Step between rows
+                        inputs.strides[2] * sW, # Step between columns
+                        inputs.strides[1],      # Move down 1 row inside patch
+                        inputs.strides[2],      # Move right 1 col inside patch
+                        inputs.strides[3],      # Step between each channel
+                    )
+                )
+                expanded_output = self.output[:, :, :, cp.newaxis, cp.newaxis, :]
+                mask = (patches == expanded_output)
+
+                #expand upstream gradient 
+                expanded_dvalues = dvalues[:, :, :, cp.newaxis, cp.newaxis, :]
+                dpatches = expanded_dvalues * mask
+
+                dinputs_canvas = dpatches.transpose(0, 1, 3, 2, 4, 5).reshape(S, H_out * fH, W_out * fW, C)
+                
+                dinputs_padded[:, :H_out * fH, :W_out * fW, :] = dinputs_canvas
+                dinputs = dinputs_padded[:, pad_top : pad_top + H_in, pad_left : pad_left + W_in, :]
+
+            else:                                   # Branch where windows overlap
+                
+                max_rows, max_cols = self.max_indicies
+
+                s_idx, h_idx, w_idx, c_idx = cp.ogrid[:S, :H_out, :W_out, :C]
+
+                input_h = (h_idx * sH) + max_rows
+                input_w = (w_idx * sW) + max_cols
+
+                cp.add.at(dinputs_padded, (s_idx, input_h, input_w, c_idx), dvalues)
+
+                dinputs = dinputs_padded[:, 
+                            pad_top : pad_top + H_in, 
+                            pad_left : pad_left + W_in, :]       
+        if self.pooling_type == "average":
+            if self.strides == self.filter_size: # Non-overlapping windows
+                inputs = self.inputs
+                patches = as_strided(inputs, 
+                                    shape = (S, H_out, W_out, fH, fW, C),
+                                    strides = (
+                                        inputs.strides[0],      # Step between samples
+                                        inputs.strides[1] * sH, # Step between rows
+                                        inputs.strides[2] * sW, # Step between columns
+                                        inputs.strides[1],      # Move down 1 row inside patch
+                                        inputs.strides[2],      # Move right 1 col inside patch
+                                        inputs.strides[3],      # Step between each channel
+                    ))
+                
+                mask = cp.ones_like(patches)
+                expanded_dvalues = dvalues[:, :, :, cp.newaxis, cp.newaxis, :]
+                dpatches = (expanded_dvalues * mask) / (fH * fW)
+
+                dinputs_padded = cp.zeros((S, padded_H, padded_W, C), dtype=dvalues.dtype)
+                dinputs_canvas = dpatches.transpose(0, 1, 3, 2, 4, 5).reshape(S, H_out * fH, W_out * fW, C)
+                dinputs_padded[:, :H_out * fH, :W_out * fW, :] = dinputs_canvas
+                dinputs = dinputs_padded[:, pad_top : pad_top + H_in, pad_left : pad_left + W_in, :]
+                
+            else:                                   # Branch where windows overlap
+
+                dilated_H = (H_out - 1) * sH + 1
+                dilated_W = (W_out - 1) * sW + 1
+
+                dvalues_dilated = cp.zeros(S, dilated_H, dilated_W, C, dtype=dvalues.dtype)
+
+                backward_pad_top = (fH - 1) - pad_top
+                backward_pad_left = (fW - 1) - pad_left
+                backward_pad_bottom = (H_in + fH - 1) - dilated_H - backward_pad_top
+                backward_pad_right = (W_in + fW - 1) - dilated_W - backward_pad_left
+
+                dvalues_padded = cp.pad(dvalues_dilated, pad_width = (
+                    (0, 0), (backward_pad_top, backward_pad_bottom), (backward_pad_left, backward_pad_right), (0, 0)
+                ))
+
+                dvalues_patches = as_strided(
+                    dvalues_padded,
+                    shape=(S, H_out, W_out, fH, fW, C),
+                    strides=(
+                        dvalues_padded.strides[0],       # step between samples
+                        dvalues_padded.strides[1] * sH,  # step down a row
+                        dvalues_padded.strides[2] * sW,  # step across a column
+                        dvalues_padded.strides[1],       # move down 1 row inside patch
+                        dvalues_padded.strides[2],       # move right 1 col inside patch
+                        dvalues_padded.strides[3],       # step across channels
+                    ))
+                scale_factor = cp.array(1.0 / (fH * fW), dtype = dvalues.dtype)
+                dinputs = dvalues_patches.sum(axis = (3,4) * scale_factor)
+
+        return dinputs
 
 class Layer_Dense:
     def __init__(self, n_inputs, n_neurons, weight_regularizer_l1 = 0,
