@@ -263,24 +263,14 @@ class Model:
     def to(self, device):
         """
         Ahead-Of-Time compilation and device migration step.
-        Swaps the global backend, moves parameters, and compiles custom fused kernels.
         """
+
         target_device = device.lower()
         config.set_backend(target_device)
         self.device = target_device
 
-        # Cascade down the network architecture
         for layer in self.layers:
-            # Swap customized kernel pointers if layer supports it 
-            if hasattr(layer, '_compile_for_device'):
-                layer._compile_for_device(target_device)
-            
-            # Move physical VRAM/RAM parameters
-            if hasattr(layer, 'weights'):
-                layer.weights = config.to_device(layer.weights, target=target_device)
-            
-            if hasattr(layer, 'biases'):
-                layer.biases = config.to_device(layer.biases, target=target_device)
+            layer.to(target_device)
 
     #Returns paramteres of trainable layers
     def get_parameters(self):

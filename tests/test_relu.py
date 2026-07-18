@@ -44,7 +44,7 @@ def make_suite(backend_name, Layer_Class):
             ], dtype=self.xp.float32)
             
             # Execute forward pass using the instance layer
-            self.layer.forward(inputs)
+            self.layer.forward(inputs, training=False)
             
             actual_output = self.layer.output
             
@@ -73,7 +73,7 @@ def make_suite(backend_name, Layer_Class):
                 [0.0, 0.0, 0.5, 0.5]
             ], dtype=self.xp.float32)
             
-            self.layer.forward(inputs)
+            self.layer.forward(inputs, training=False)
             self.layer.backward(dvalues)
             
             actual_dinputs = self.layer.dinputs

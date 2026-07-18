@@ -1,7 +1,7 @@
 import numpy as np
 import aether.config as config
-
-class Conv:
+from aether.blocks.base import Layer
+class Conv(Layer):
     def __init__(self, input_shape, num_filters = 1, filter_size = (3, 3), strides = (1, 1), padding = "same"):
 
         xp = config.xp
@@ -150,7 +150,7 @@ class Conv:
 
         return self.dinputs
     
-class Pooling:
+class Pooling(Layer):
 
     def __init__(self, filter_size = (2, 2), strides = (2, 2),
                   padding = "valid", pooling_type = "max"):
@@ -351,7 +351,7 @@ class Pooling:
 
         return dinputs
     
-class SpatialDropout: 
+class SpatialDropout(Layer): 
     def __init__(self, rate):
         
         self.rate = rate
@@ -373,5 +373,4 @@ class SpatialDropout:
         return self.output
     
     def backward(self, dvalues): 
-        xp = config.get_array_module(dvalues)
         self.dinputs = dvalues * self.channel_mask

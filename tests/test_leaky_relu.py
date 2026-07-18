@@ -43,7 +43,7 @@ def make_suite(backend_name, Layer_Class):
                 [0.5, 2.0, 5.0]
             ], dtype =self.xp.float32)
 
-            actual_output = self.layer.forward(inputs, training=True)
+            actual_output = self.layer.forward(inputs, training=False)
 
             self.xp.testing.assert_array_almost_equal(
                 actual_output,
@@ -74,7 +74,7 @@ def make_suite(backend_name, Layer_Class):
                 [0.1, 1.0, 1.0, 0.1]
             ], dtype=self.xp.float32)
 
-            self.layer.forward(inputs)
+            self.layer.forward(inputs, training=False)
             self.layer.backward(dvalues)
 
             actual_dinputs = self.layer.dinputs 
@@ -127,7 +127,7 @@ def make_suite(backend_name, Layer_Class):
             ], dtype=self.xp.float32)
 
             desired_dvalues = dvalues.copy()
-            self.layer.forward(inputs)
+            self.layer.forward(inputs, training=False)
             self.layer.backward(dvalues)
 
             self.xp.testing.assert_array_equal(
@@ -148,7 +148,7 @@ def make_suite(backend_name, Layer_Class):
             inputs = self.xp.array([[-2.0, -4.0]], dtype=self.xp.float32)
             expected_output = self.xp.array([[-0.5, -1.0]], dtype=self.xp.float32)
 
-            custom_layer.forward(inputs)
+            custom_layer.forward(inputs, training=False)
 
             self.xp.testing.assert_array_almost_equal(
                 custom_layer.output,
