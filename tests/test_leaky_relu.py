@@ -2,6 +2,7 @@ import unittest
 
 from aether.config import set_backend
 import aether.config as config
+from tests.base_case import AetherBaseTestCase
 
 from aether.blocks.activations import LeakyReLU
 TARGET_LAYER = LeakyReLU
@@ -15,7 +16,9 @@ except (ImportError, Exception):
     pass
 
 def make_suite(backend_name, Layer_Class):
-    class TestLeakyReLU(unittest.TestCase):
+
+    class_name = f"Test_{TARGET_LAYER.__name__}_{backend_name.upper()}"
+    class TestLeakyReLU(AetherBaseTestCase):
         def setUp(self):
             # Function from aether.config.py 
             set_backend(backend_name=backend_name)
@@ -133,9 +136,6 @@ def make_suite(backend_name, Layer_Class):
                 err_msg="Framework VRAM leakage/corruption: dvalues is " \
                 " being mutated in-place during the backward pass."
             )
-        def tearDown(self):
-            """Reset tracking state to system NumPy default safely between tests."""
-            set_backend(backend_name='numpy')
     
         def test_custom_alpha_scaling(self):
             """Verify hyperparameter integrity"""
@@ -156,13 +156,9 @@ def make_suite(backend_name, Layer_Class):
                 decimal=4,
                 err_msg=f"Hyperparameter initialization mismatch: Custom alpha scaling failed to apply value {custom_alpha} properly."
             )
-        def tearDown(self):
-            """Reset tracking state to system NumPy default safely between tests."""
-            if config.HAS_CUPY:
-                cp.cuda.Stream.null.synchronize()
-                cp.get_default_memory_pool().free_all_blocks()
-                cp.get_default_pinned_memory_pool().free_all_blocks()
-            set_backend(backend_name='numpy')
+
+    TestLeakyReLU.__name__ = class_name
+    TestLeakyReLU.__name__ = class_name
     return TestLeakyReLU
 
 for backend in backends_to_test:

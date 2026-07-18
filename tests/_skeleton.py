@@ -4,6 +4,7 @@ import unittest
 # Core Framework Configuration Imports
 from aether.config import set_backend, get_stride_utility
 import aether.config as config
+from tests.base_case import AetherBaseTestCase
 
 # Replace this with your specific layout import
 from aether.blocks.conv import Conv
@@ -22,8 +23,9 @@ except (ImportError, Exception):
 
 # Dynamic Factory Class Generation
 def make_suite(backend_name, Layer_Class):
+    class_name = f"Test_{Layer_Class.__name__}_{backend_name.upper()}"
     # Rewrite `TestLayer` for specific class being tested
-    class TestLayer(unittest.TestCase):
+    class TestLayer(AetherBaseTestCase):
         def setUp(self):
             # Function from aether.config.py 
             set_backend(backend_name=backend_name)
@@ -31,7 +33,7 @@ def make_suite(backend_name, Layer_Class):
 
             # Grab extra utility imports for specific backend if needed
             self.as_strided = get_stride_utility(self.xp)
-            self.Layer = Layer_Class
+            self.layer = Layer_Class
 
             # If a backend requires seperate functions, mimic Model.to
             # otherwise do nothing
@@ -40,21 +42,21 @@ def make_suite(backend_name, Layer_Class):
         
         def test_conv_forward_shape(self):
             """Verify output dimensions based on padding and stride"""
-            output = self.conv.forward(self.test_images, training=True)
+            output = self.layer.forward(self.test_images, training=True)
             # Given padding = 1, kernel = 3, 28x28 remainds 28x28 (same)
-            self.assertEqual(output.shape, (2, 28, 28, 4))
+            
+            expected_shape = (2, 28, 28, 4)
+            self.assertEqual(output.shape, expected_shape)
+
         def test_conv_numerical_gradient_check(self):
-            # Backward pass calculations go here
+            """Verify that analytical backpropagation calculations evaluate properly."""
             pass
         # Implement more tests if needed by creating more functions 
+        
+    # Metaprogramming class property remapping for clear test-runner outputs
+    TestLayer.__name__ = class_name
+    TestLayer.__qualname__ = class_name
 
-        def tearDown(self):
-            """Reset tracking state to system NumPy default safely between tests."""
-            if config.HAS_CUPY:
-                cp.cuda.Stream.null.synchronize()
-                cp.get_default_memory_pool().free_all_blocks()
-                cp.get_default_pinned_memory_pool().free_all_blocks()
-            set_backend(backend_name='numpy')
     return TestLayer
 
 # Global Unpacking Loop

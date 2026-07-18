@@ -3,6 +3,7 @@ import numpy as np
 
 from aether.config import set_backend
 import aether.config as config
+from tests.base_case import AetherBaseTestCase
 
 from aether.blocks.linear import Dense
 TARGET_LAYER = Dense
@@ -16,14 +17,15 @@ except:
     pass 
 
 def make_suite(backend_name, Layer_Class):    
+
+    class_name = f"Test_{Layer_Class.__name__}_{backend_name.upper()}"
     class TestDenseLayer(unittest.TestCase): 
         def setUp(self):
-
             set_backend(backend_name=backend_name)
             self.xp = config.xp
 
             self.xp.random.seed(42)
-            self.layer = Dense(n_inputs=5, n_neurons=3)
+            self.layer = Layer_Class(n_inputs=5, n_neurons=3)
             self.test_input = self.xp.random.randn(10, 5) 
 
         def test_forward_shape(self):
@@ -129,13 +131,8 @@ def make_suite(backend_name, Layer_Class):
             self.xp.testing.assert_array_almost_equal(
                 analytical_dweights, numerical_dweights, decimal=4
             )
-        def tearDown(self):
-            """Reset tracking state to system NumPy default safely between tests."""
-            if config.HAS_CUPY:
-                cp.cuda.Stream.null.synchronize()
-                cp.get_default_memory_pool().free_all_blocks()
-                cp.get_default_pinned_memory_pool().free_all_blocks()
-            set_backend(backend_name='numpy')
+    TestDenseLayer.__name__ = class_name
+    TestDenseLayer.__qualname__ = class_name
     return TestDenseLayer 
 
 for backend in backends_to_test:

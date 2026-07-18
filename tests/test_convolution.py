@@ -4,6 +4,7 @@ import numpy as np
 # Core Framework Configuration Imports
 from aether.config import set_backend, get_stride_utility
 import aether.config as config
+from tests.base_case import AetherBaseTestCase
 
 from aether.blocks.conv import Conv
 TARGET_LAYER = Conv
@@ -18,7 +19,9 @@ except (ImportError, Exception):
 
 
 def make_suite(backend_name, Layer_Class):
-    class TestConvLayer(unittest.TestCase):
+
+    class_name = f"Test_{TARGET_LAYER.__name__}_{backend_name.upper()}"
+    class TestConvLayer(AetherBaseTestCase):
 
         def setUp(self):
 
@@ -142,13 +145,9 @@ def make_suite(backend_name, Layer_Class):
             self.xp.testing.assert_array_almost_equal(
                 analytical_dweights, numerical_dweights, decimal=3
             )
-        def tearDown(self):
-            """Reset tracking state to system NumPy default safely between tests."""
-            if config.HAS_CUPY:
-                cp.cuda.Stream.null.synchronize()
-                cp.get_default_memory_pool().free_all_blocks()
-                cp.get_default_pinned_memory_pool().free_all_blocks()
-            set_backend(backend_name='numpy')
+
+    TestConvLayer.__name__ = class_name
+    TestConvLayer.__qualname__ = class_name
     return TestConvLayer
 
 # Global Unpacking Loop

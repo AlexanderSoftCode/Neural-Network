@@ -3,6 +3,7 @@ import numpy as np
 
 from aether.config import set_backend
 import aether.config as config
+from tests.base_case import AetherBaseTestCase
 
 from aether.blocks.activations import ReLU
 TARGET_LAYER = ReLU
@@ -17,7 +18,8 @@ except (ImportError, Exception):
 
 def make_suite(backend_name, Layer_Class):
 
-    class TestReLU(unittest.TestCase):
+    class_name = f"Test_{Layer_Class.__name__}_{backend_name.upper()}"
+    class TestReLU(AetherBaseTestCase):
         def setUp(self):
             set_backend(backend_name=backend_name)
             self.xp = config.xp
@@ -82,14 +84,8 @@ def make_suite(backend_name, Layer_Class):
                 decimal=4,
                 err_msg="Backward pass failed: gradient routing mismatch."
             )
-        
-        def tearDown(self):
-            """Reset tracking state to system NumPy default safely between tests."""
-            if config.HAS_CUPY:
-                cp.cuda.Stream.null.synchronize()
-                cp.get_default_memory_pool().free_all_blocks()
-                cp.get_default_pinned_memory_pool().free_all_blocks()
-            set_backend(backend_name='numpy')
+    TestReLU.__name__ = class_name
+    TestReLU.__qualname__ = class_name
             
     return TestReLU
 
