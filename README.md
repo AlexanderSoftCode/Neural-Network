@@ -17,7 +17,7 @@ Below are the core components currently implemented:
 
 ## Custom Framework Diagram
 
-![alt text](CNN/notebooks/assets/Framework.png)
+![alt text](notebooks/assets/Framework.png)
 
 The diagram above illustrates the design of the framework. The project is structured around a central `Model` **class** that acts as an orchestrator for the all major components.  
 
@@ -25,11 +25,11 @@ The diagram above illustrates the design of the framework. The project is struct
 
 The diagram below demonstrates an example convolutional neural network constructed via the framework, incorporating convolutional layers, pooling, flattening, dropout, and fully connected classification.
 
-![alt text](CNN/notebooks/assets/ExampleCNN.png)
+![alt text](notebooks/assets/ExampleCNN.png)
 
 ## Performance: Fashion-MNIST Benchmark 
 
-![alt text](CNN/notebooks/assets/CNNResults.png)
+![alt text](notebooks/assets/CNNResults.png)
 
 **Analysis**: While the CNN takes significantly longer to train(reflecting complexity of manual einsum operations), a prominent +3.8% boost in generalization is shown on the testing set, compared to a MLP architecture. This slowdown is due to the implementation of `Conv_Layer` and `Pooling`. Both models were trained on an NVIDIA RTX 3050 Mobile using CuPy backend
 
