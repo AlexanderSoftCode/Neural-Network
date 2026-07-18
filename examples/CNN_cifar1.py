@@ -2,7 +2,7 @@ import cupy as cp
 import numpy as np
 import time
 import matplotlib.pyplot as plt
-from CNN.models.CNN_model_cupy import *
+from aether.blocks.CNN_model_cupy import *
 
 print("Cupy version")
 

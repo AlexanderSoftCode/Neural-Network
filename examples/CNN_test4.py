@@ -1,6 +1,6 @@
 import numpy as np
 import time
-from CNN.models.CNN_model import *
+from aether.blocks.CNN_model import *
 
 print("Numpy version")
 data = np.load("data/cifar10_clean.npz")

@@ -1,7 +1,7 @@
 import numpy as np
 import time 
 
-from CNN.models.CNN_model import *
+from aether.blocks.CNN_model import *
 
 print("Numpy version")
 #X, y, X_test, y_test = create_data_mnist('fashion_mnist_images')

@@ -1,59 +1,66 @@
 # Template for writing a test file for a layer
 import unittest
-import numpy as np
 
-# 1. Base Import from CPU backend
-from CNN.models.CNN_classes import Pooling  # Example layer class
+# Core Framework Configuration Imports
+from aether.config import set_backend, get_stride_utility
+import aether.config as config
 
-# Initialize profiles list with the mandatory NumPy suite
-test_profiles = [
-    (np, Pooling)
-]
+# Replace this with your specific layout import
+from aether.blocks.conv import Conv
+TARGET_LAYER = Conv
 
-# 2. Safe GPU check & loading loop
+backends_to_test = ['numpy']
+# GPU check & loading loop
 try:
     import cupy as cp
-    # Assuming your GPU class maps cleanly or is imported from your cupy file
-    from CNN.models.CNN_classes_cupy import Pooling as PoolingCuPy
+    backends_to_test.append('cupy')
+    # Assuming the GPU class maps cleanly or is imported from users CuPy file
 
-    test_profiles.append((cp, PoolingCuPy))
 except (ImportError, Exception):
-    pass  # Gracefully fall back onto the NumPy suite if CUDA/ROCm isn't present
+    pass  # Fall back onto the NumPy suite if CUDA/ROCm isn't present
 
 
-# 3. Dynamic Factory Class Generation
-def make_suite(xp, Layer_Class):
-    
+# Dynamic Factory Class Generation
+def make_suite(backend_name, Layer_Class):
+    # Rewrite `TestLayer` for specific class being tested
     class TestLayer(unittest.TestCase):
         def setUp(self):
-            # Attach the engine module and structural class to 'self'
-            # Now every test function below can adapt dynamically!
-            self.xp = xp
+            # Function from aether.config.py 
+            set_backend(backend_name=backend_name)
+            self.xp = config.xp
+
+            # Grab extra utility imports for specific backend if needed
+            self.as_strided = get_stride_utility(self.xp)
             self.Layer = Layer_Class
 
-        def test_forward_shape(self):
-            # Example write up using your universal engine syntax:
-            x = self.xp.ones((2, 4, 4, 3), dtype=self.xp.float32)
-            layer = self.Layer(filter_size=(2, 2), strides=(2, 2), padding="valid")
-            output = layer.forward(x, training=True)
-            
-            self.assertEqual(output.shape, (2, 2, 2, 3))
-
-        def test_backward_gradient(self):
-            # Your complex backward pass assertions go here...
+            # If a backend requires seperate functions, mimic Model.to
+            # otherwise do nothing
+            if hasattr(self.layer, '_compile_for_device'):
+                self.layer._compile_for_device(backend_name)
+        
+        def test_conv_forward_shape(self):
+            """Verify output dimensions based on padding and stride"""
+            output = self.conv.forward(self.test_images, training=True)
+            # Given padding = 1, kernel = 3, 28x28 remainds 28x28 (same)
+            self.assertEqual(output.shape, (2, 28, 28, 4))
+        def test_conv_numerical_gradient_check(self):
+            # Backward pass calculations go here
             pass
+        # Implement more tests if needed by creating more functions 
 
+        def tearDown(self):
+            """Reset tracking state to system NumPy default safely between tests."""
+            if config.HAS_CUPY:
+                cp.cuda.Stream.null.synchronize()
+                cp.get_default_memory_pool().free_all_blocks()
+                cp.get_default_pinned_memory_pool().free_all_blocks()
+            set_backend(backend_name='numpy')
     return TestLayer
 
-
-# 4. Global Unpacking Loop (Fixed bugs here)
-for backend_xp, layer_cls in test_profiles:
-    # Build the specific dynamic class instance
-    layer_suite = make_suite(backend_xp, layer_cls)
+# Global Unpacking Loop
+for backend in backends_to_test:
     
-    # Grab the string representation (__name__ converts np to 'numpy' and cp to 'cupy')
-    backend_name = backend_xp.__name__
+    class_name = f"Test_{TARGET_LAYER.__name__}_{backend.upper()}"
 
-    # Bind the generated class to the global workspace module context
-    # This generates "TestLayer_numpy" and "TestLayer_cupy"
-    globals()[f"TestLayer_{backend_name}"] = layer_suite
+    # Bind generated class to the global namespace for unittest discovery
+    globals()[class_name] = make_suite(backend_name=backend, Layer_Class=TARGET_LAYER)

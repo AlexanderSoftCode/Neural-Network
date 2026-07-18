@@ -1,33 +1,39 @@
-import numpy as np 
-from numpy.lib.stride_tricks import as_strided
+import cupy as cp 
+from cupy.lib.stride_tricks import as_strided
+import aether.config as config
 
-class Conv_Layer:
+class Conv:
     def __init__(self, input_shape, num_filters = 1, filter_size = (3, 3), strides = (1, 1), padding = "same"):
 
-        #input_shape has form (height, width, channels) 
-        #where batch size would be accounted for in the forward and backwards passes
-        self.input_shape = input_shape 
+        #input_shape has form (batch_size, height, width, channels)
+        self.input_shape = input_shape
         self.num_filters = num_filters
         self.filter_size = filter_size
         self.strides = strides
         self.padding = padding 
-        self.biases = np.zeros(self.num_filters) 
+        self.biases = cp.zeros(self.num_filters, dtype = cp.float32) * 0.01
+        self.weight_regularizer_l1 = 0
+        self.weight_regularizer_l2 = 0
+        self.bias_regularizer_l1 = 0
+        self.bias_regularizer_l2 = 0
 
         #We'll handle two scenarios, the first, where we pass in a (n, n, 1) or grayscale image, and a second
         #where we'll handle a (n, n, 3) or RGB image. 
         input_depth = input_shape[-1]
         n = self.filter_size[0] * self.filter_size[1] * input_depth
-        std = np.sqrt(2.0 / n)
+        std = cp.sqrt(cp.float32(2.0 / n))
         
         #We can now do He initaliztion, we'll sample values from a standard distribution N (0, 1) and multiply it by our
         #std value to get N(0, std) 
 
-        self.filter_weights = np.random.randn(
+        self.filter_weights = (cp.random.randn(
             filter_size[0],         #height
             filter_size[1],         #width
             input_depth,            #depth 
             num_filters             #number of filters
-        )* std
+        ).astype(cp.float32)* std)
+
+        self.weights = self.filter_weights
 
     def forward(self, inputs, training):
         #Extract Input dimensions
@@ -38,26 +44,28 @@ class Conv_Layer:
         
         #Creating padding depending on padding = same, or padding = valid
         if self.padding == "same":
-            P = (self.filter_size[0] - 1) // 2
+            self.forward_pad_h = (self.filter_size[0] - 1) // 2
+            self.forward_pad_w = (self.filter_size[1] - 1) // 2
         else:            
-            P = 0
+            self.forward_pad_h = 0
+            self.forward_pad_w = 0
 
         #We need integer output dimensions, so cast equations to int
-        H_out = int((H_in + 2 * P - self.filter_size[0]) / self.strides[0] + 1)
-        W_out = int((W_in + 2 * P - self.filter_size[1]) / self.strides[1] + 1)
+        H_out = int((H_in + 2 * self.forward_pad_h - self.filter_size[0]) / self.strides[0] + 1)
+        W_out = int((W_in + 2 * self.forward_pad_w - self.filter_size[1]) / self.strides[1] + 1)
         
         #(0, 0) -> don't touch the number of samples in the batch
         #(P, P) -> pad top and bottom pixels by P pixels (axis 1)
         #(P, P) -> pad left and right pixels by P pixels (axis 2)
         #(0, 0) -> don't pad depth. 
         #contstant -> add constant_values for the padded values
-        padded_inputs = np.pad(array = inputs, 
-                            pad_width = ((0, 0), (P, P), (P, P), (0, 0)),
+        padded_inputs = cp.pad(array = inputs, 
+                            pad_width = ((0, 0), (self.forward_pad_h, self.forward_pad_h), (self.forward_pad_w, self.forward_pad_w), (0, 0)),
                             mode = 'constant',
-                            constant_values = 0)
+                            constant_values = 0).astype(cp.float32, copy = False)
 
         #Create an output tensor of size (batch_size, H_out, W_out, C_out)
-        self.output = np.zeros((S, H_out, W_out, self.num_filters))
+        self.output = cp.zeros((S, H_out, W_out, self.num_filters), dtype = cp.float32)
 
         #create our sliding window
         self.patches = as_strided(
@@ -74,7 +82,7 @@ class Conv_Layer:
         )
 
         #Keep the samples, h_out, w_out, and the number of channels out. But, iterate over the patch(x, y) with channels c, and with the number of filters d
-        self.output = np.einsum('shwxyc,xycd->shwd', self.patches, self.filter_weights)
+        self.output = cp.einsum('shwxyc,xycd->shwd', self.patches, self.filter_weights)
         self.output += self.biases.reshape((1, 1, 1, self.num_filters)) 
 
         self.inputs = inputs
@@ -82,58 +90,70 @@ class Conv_Layer:
         return self.output
         #save the output tensor using self. for backpropogation
 
+    
     def backward(self, dvalues):
+
         #extract dvalues dimensions
         S, H_out, W_out, C_out = dvalues.shape
         fH, fW, C_in, C_out = self.filter_weights.shape
         sH, sW = self.strides
+        _, H_in, W_in, _ = self.inputs.shape 
 
-        #dbiases has shape c_out as we intend to add dvalues to each filter. 
-        self.dbiases = np.sum(dvalues, axis = (0 , 1, 2)) 
+        #Now we need to account for dbiases and dweights
+
+        self.dbiases = cp.sum(dvalues, axis = [0, 1, 2])
+
+        self.dweights = cp.tensordot(self.patches, dvalues, axes = ([0, 1, 2], [0, 1, 2]))
+
+        dilated_H = (H_out - 1) * sH + 1
+        dilated_W = (W_out - 1) * sW + 1 
         
-        self.dweights = np.einsum("shwxyc, shwd -> xycd", self.patches, dvalues)
+        dvalues_dilated = cp.zeros(shape= (S, dilated_H, dilated_W, C_out), dtype= dvalues.dtype)
+        # Inject values using step slices
+        dvalues_dilated[:, ::sH, ::sW, :] = dvalues
+        
+        # padding 
+        if self.padding == "same": 
+            backward_pad_h = (fH - 1) - self.forward_pad_h
+            backward_pad_w = (fW - 1) - self.forward_pad_w
+        if self.padding == "valid": 
+            backward_pad_h = (fH - 1)
+            backward_pad_w = (fW - 1)
+        
+        dvalues_padded = cp.pad(dvalues_dilated, pad_width= ((0, 0), (backward_pad_h, backward_pad_h), (backward_pad_w, backward_pad_w), (0, 0)))
 
-        padded_dinputs = np.zeros_like(self.padded_inputs, dtype = np.float32)
-
-        contributions = np.einsum("shwd, xycd -> shwxyc", dvalues, self.filter_weights)
-
-        #We'll use our window feature to add whatever contributions we had, 
-        #By using writeable, we'll be able to add stuff. 
-        dinput_patches = as_strided(
-            padded_dinputs,
-            shape = (S, H_out, W_out, fH, fW, C_in),
-            strides = (
-            padded_dinputs.strides[0],       # step between samples
-                padded_dinputs.strides[1] * sH,  # step down a row
-                padded_dinputs.strides[2] * sW,  # step across a column
-                padded_dinputs.strides[1],       # move down 1 row inside patch
-                padded_dinputs.strides[2],       # move right 1 col inside patch
-                padded_dinputs.strides[3],       # step across channels
-            ),
-            writeable=True
+        # flip the values in the fH and fW dimensions, leave C_in and C_out dimensions alone
+        flipped_weights = self.filter_weights[::-1, ::-1, :, :]
+        dvalues_patches = as_strided(dvalues_padded, 
+                            shape = (S, H_in, W_in, fH, fW, C_out),
+                            strides=(
+                                dvalues_padded.strides[0],  # Batch step
+                                dvalues_padded.strides[1],  # Window grid row step (backward stride = 1)
+                                dvalues_padded.strides[2],  # Window grid col step (backward stride = 1)
+                                dvalues_padded.strides[1],  # Internel window pixel row step
+                                dvalues_padded.strides[2],  # Internel window pixel col step
+                                dvalues_padded.strides[3]   # Output channel step
+                            ))
+    
+        self.dinputs = cp.tensordot(
+            dvalues_patches, 
+            flipped_weights, 
+            axes=([3, 4, 5], [0, 1, 3]) # Match fH, fW, C_out
         )
 
-        dinput_patches += contributions 
-
-        #truncate our borders 
-        if self.padding == "same":
-            P = (fH - 1) // 2
-            self.dinputs = padded_dinputs[:, P:-P, P:-P, :] 
-        else:
-            self.dinputs = padded_dinputs[:, :, :, :] 
-
         return self.dinputs
+class Pooling:
 
-class Pooling: 
     def __init__(self, filter_size = (2, 2), strides = (2, 2),
                   padding = "valid", pooling_type = "max"):
         self.filter_size = filter_size
         self.strides = strides
         self.padding = padding
         self.pooling_type = pooling_type
-
+        
     def forward(self, inputs, training):
         #Inputs should be of shape (S, H_in, W_in, C = D_in) 
+        inputs = inputs.astype(cp.float32, copy = False)
         if inputs.ndim != 4:
             raise ValueError(f"Expected a 4D tensor, got {inputs.ndim} instead.")
         S, H_in, W_in, C = inputs.shape
@@ -142,17 +162,22 @@ class Pooling:
 
         padding = self.padding
         if padding == "valid":
-            H_out = np.floor((H_in - fH) / sH) + 1
-            W_out = np.floor((W_in - fW) / sW) + 1
-        
+            H_out = int(cp.floor((H_in - fH) / sH + 1).item())
+            W_out = int(cp.floor((W_in - fW) / sW + 1).item())
+
+            self.pad_top, self.pad_bottom, self.pad_left, self.pad_right = 0, 0, 0, 0
         elif padding == "same":
+            
+            H_out = int(cp.ceil(H_in / sH).item())
+            W_out = int(cp.ceil(W_in / sW).item())
+
             pad_h = max((H_out - 1) * sH + fH - H_in, 0)
             pad_w = max((W_out - 1) * sW + fW - W_in, 0)
-            pad_top = pad_h // 2
-            pad_bottom = pad_h - pad_top
-            pad_left = pad_w // 2
-            pad_right = pad_w - pad_left
-            inputs = np.pad(inputs, ((0,0), (pad_top,pad_bottom), (pad_left,pad_right), (0,0)), mode='constant')
+            self.pad_top = pad_h // 2
+            self.pad_bottom = pad_h - self.pad_top
+            self.pad_left = pad_w // 2
+            self.pad_right = pad_w - self.pad_left
+            inputs = cp.pad(inputs, ((0,0), (self.pad_top,self.pad_bottom), (self.pad_left,self.pad_right), (0,0)), mode='constant')
         else: 
             raise ValueError(f"Expected padding == valid or same, recieved {padding} instead")
 
@@ -160,7 +185,7 @@ class Pooling:
         H_out, W_out = int(H_out), int(W_out)
 
         #create output tensor with new sizes
-        self.output = np.zeros(shape = (S, H_out, W_out, C))
+        self.output = cp.zeros(shape = (S, H_out, W_out, C))
         self.inputs = inputs
         patches = as_strided(
             inputs,
@@ -169,7 +194,7 @@ class Pooling:
                 inputs.strides[0],      #step between samples
                 inputs.strides[1] * sH, #step between rows
                 inputs.strides[2] * sW, #step between columns
-                inputs.strides[1],      #move down 1 row inside patch
+                inputs.strides[1],      #Move down 1 row inside patch
                 inputs.strides[2],      #move right 1col inside patch
                 inputs.strides[3],      #step between each channel
             )
@@ -183,7 +208,7 @@ class Pooling:
 
             #Now, we'll convert those flat indicies back to row col coordinates withing each
             #(fH, fW) patch
-            max_rows, max_cols = np.unravel_index(flat_indicies, (fH, fW)) 
+            max_rows, max_cols = cp.unravel_index(flat_indicies, (fH, fW)) 
             self.max_indicies = (max_rows, max_cols) 
         
         elif self.pooling_type == "average":
@@ -191,62 +216,135 @@ class Pooling:
             
         #Store both of these for backprop
         self.inputs = inputs
-        self.output = pooled
-        return self.output
-
+        output = pooled
+        return output
+    
     def backward(self, dvalues):
-        
-        #We want the same shape as self.inputs, we'll populate the tensor with zeros at first then unpool later.
-        self.dinputs = np.zeros_like(self.inputs)
+
         S, H_out, W_out, C = dvalues.shape
-        fH, fW = self.filter_size
-        sH, sW = self.strides
-        
+        fH, fW, sH, sW = self.filter_size, self.strides
+        _, H_in, W_in, _ = self.inputs.shape
+
+        if self.padding == "valid":
+            pad_top = pad_bottom = pad_left = pad_right = 0
+            padded_H, padded_W = H_in, W_in
+        elif self.padding == "same":
+                
+            pad_top = self.pad_top
+            pad_bottom = self.pad_bottom
+            pad_left = self.pad_left
+            pad_right = self.pad_right
+
+            padded_H = H_in + pad_top + pad_bottom
+            padded_W = W_in + pad_left + pad_right
+
         if self.pooling_type == "max":
-            max_rows, max_cols = self.max_indicies
-            
-            s_idx = np.arange(S)[:, None, None, None]      # Shape: (S, 1, 1, 1)
-            h_idx = np.arange(H_out)[None, :, None, None]  # Shape: (1, H_out, 1, 1)
-            w_idx = np.arange(W_out)[None, None, :, None]  # Shape: (1, 1, W_out, 1)
-            c_idx = np.arange(C)[None, None, None, :]      # Shape: (1, 1, 1, C)
-            
-            # Calculate where in the input each gradient should go
-            # Broadcasting creates arrays of shape (S, H_out, W_out, C)
-            input_h = h_idx * sH + max_rows  # h_idx broadcasts, max_rows is already (S, H_out, W_out, C)
-            input_w = w_idx * sW + max_cols
-            
-            # Accumulate gradients at the right positions
-            # np.add.at handles if multiple output positions map to same input position
-            np.add.at(self.dinputs, (s_idx, input_h, input_w, c_idx), dvalues)
-        
-        elif self.pooling_type == "average":
-            patches = as_strided(
-            self.dinputs,
-            shape = (S, H_out, W_out, fH, fW, C), 
-            strides = (
-                self.dinputs.strides[0],      #step between samples
-                self.dinputs.strides[1] * sH, #step between rows
-                self.dinputs.strides[2] * sW, #step between columns
-                self.dinputs.strides[1],      #Move down 1 row inside patch
-                self.dinputs.strides[2],      #move right 1col inside patch
-                self.dinputs.strides[3],      #step between each channel
-            ),
-            writeable = True
-            )
-            
-            add_vals = dvalues[:, :, :, None, None, :] / (fH * fW)
-            np.add(patches, add_vals, out = patches) 
-        return self.dinputs
+            if self.strides == self.filter_size:    # Non-overlapping windows
+                
+                dinputs_padded = cp.zeros((S, padded_H, padded_W, C), dtype=dvalues.dtype)
+                #compute non-overlapping windows
+                inputs = self.inputs
+                patches = as_strided(
+                    inputs,
+                    shape = (S, H_out, W_out, fH, fW, C), 
+                    strides = (
+                        inputs.strides[0],      # Step between samples
+                        inputs.strides[1] * sH, # Step between rows
+                        inputs.strides[2] * sW, # Step between columns
+                        inputs.strides[1],      # Move down 1 row inside patch
+                        inputs.strides[2],      # Move right 1 col inside patch
+                        inputs.strides[3],      # Step between each channel
+                    )
+                )
+                expanded_output = self.output[:, :, :, cp.newaxis, cp.newaxis, :]
+                mask = (patches == expanded_output)
 
+                #expand upstream gradient 
+                expanded_dvalues = dvalues[:, :, :, cp.newaxis, cp.newaxis, :]
+                dpatches = expanded_dvalues * mask
 
-class Layer_Dense:
+                dinputs_canvas = dpatches.transpose(0, 1, 3, 2, 4, 5).reshape(S, H_out * fH, W_out * fW, C)
+                
+                dinputs_padded[:, :H_out * fH, :W_out * fW, :] = dinputs_canvas
+                dinputs = dinputs_padded[:, pad_top : pad_top + H_in, pad_left : pad_left + W_in, :]
+
+            else:                                   # Branch where windows overlap
+                
+                max_rows, max_cols = self.max_indicies
+
+                s_idx, h_idx, w_idx, c_idx = cp.ogrid[:S, :H_out, :W_out, :C]
+
+                input_h = (h_idx * sH) + max_rows
+                input_w = (w_idx * sW) + max_cols
+
+                cp.add.at(dinputs_padded, (s_idx, input_h, input_w, c_idx), dvalues)
+
+                dinputs = dinputs_padded[:, 
+                            pad_top : pad_top + H_in, 
+                            pad_left : pad_left + W_in, :]       
+        if self.pooling_type == "average":
+            if self.strides == self.filter_size: # Non-overlapping windows
+                inputs = self.inputs
+                patches = as_strided(inputs, 
+                                    shape = (S, H_out, W_out, fH, fW, C),
+                                    strides = (
+                                        inputs.strides[0],      # Step between samples
+                                        inputs.strides[1] * sH, # Step between rows
+                                        inputs.strides[2] * sW, # Step between columns
+                                        inputs.strides[1],      # Move down 1 row inside patch
+                                        inputs.strides[2],      # Move right 1 col inside patch
+                                        inputs.strides[3],      # Step between each channel
+                    ))
+                
+                mask = cp.ones_like(patches)
+                expanded_dvalues = dvalues[:, :, :, cp.newaxis, cp.newaxis, :]
+                dpatches = (expanded_dvalues * mask) / (fH * fW)
+
+                dinputs_padded = cp.zeros((S, padded_H, padded_W, C), dtype=dvalues.dtype)
+                dinputs_canvas = dpatches.transpose(0, 1, 3, 2, 4, 5).reshape(S, H_out * fH, W_out * fW, C)
+                dinputs_padded[:, :H_out * fH, :W_out * fW, :] = dinputs_canvas
+                dinputs = dinputs_padded[:, pad_top : pad_top + H_in, pad_left : pad_left + W_in, :]
+                
+            else:                                   # Branch where windows overlap
+
+                dilated_H = (H_out - 1) * sH + 1
+                dilated_W = (W_out - 1) * sW + 1
+
+                dvalues_dilated = cp.zeros(S, dilated_H, dilated_W, C, dtype=dvalues.dtype)
+
+                backward_pad_top = (fH - 1) - pad_top
+                backward_pad_left = (fW - 1) - pad_left
+                backward_pad_bottom = (H_in + fH - 1) - dilated_H - backward_pad_top
+                backward_pad_right = (W_in + fW - 1) - dilated_W - backward_pad_left
+
+                dvalues_padded = cp.pad(dvalues_dilated, pad_width = (
+                    (0, 0), (backward_pad_top, backward_pad_bottom), (backward_pad_left, backward_pad_right), (0, 0)
+                ))
+
+                dvalues_patches = as_strided(
+                    dvalues_padded,
+                    shape=(S, H_out, W_out, fH, fW, C),
+                    strides=(
+                        dvalues_padded.strides[0],       # step between samples
+                        dvalues_padded.strides[1] * sH,  # step down a row
+                        dvalues_padded.strides[2] * sW,  # step across a column
+                        dvalues_padded.strides[1],       # move down 1 row inside patch
+                        dvalues_padded.strides[2],       # move right 1 col inside patch
+                        dvalues_padded.strides[3],       # step across channels
+                    ))
+                scale_factor = cp.array(1.0 / (fH * fW), dtype = dvalues.dtype)
+                dinputs = dvalues_patches.sum(axis = (3,4) * scale_factor)
+
+        return dinputs
+
+class Dense:
     def __init__(self, n_inputs, n_neurons, weight_regularizer_l1 = 0,
                  bias_regularizer_l1 = 0, weight_regularizer_l2 = 0,
                  bias_regularizer_l2 = 0):
         #With He initalization, our fan_in maintains proper variance through layers.
-        self.weights = .01 * np.random.randn(n_inputs, n_neurons) * \
-            np.sqrt(2.0 / n_inputs)
-        self.biases = np.zeros((1, n_neurons))
+        self.weights = .01 * cp.random.randn(n_inputs, n_neurons) * \
+            cp.sqrt(2.0 / n_inputs)
+        self.biases = cp.zeros((1, n_neurons))
         self.weight_regularizer_l1 = weight_regularizer_l1
         self.weight_regularizer_l2 = weight_regularizer_l2
         self.bias_regularizer_l1 = bias_regularizer_l1
@@ -254,16 +352,15 @@ class Layer_Dense:
         
     def forward(self, inputs, training):
         self.inputs = inputs 
-        self.output = np.dot(inputs, self.weights) + self.biases
-
+        self.output = cp.dot(inputs, self.weights) + self.biases
         return self.output
-    
+
     def backward(self, dvalues):
-        self.dweights = np.dot(self.inputs.T, dvalues)
-        self.dbiases = np.sum(dvalues, axis = 0, keepdims = True)
+        self.dweights = cp.dot(self.inputs.T, dvalues)
+        self.dbiases = cp.sum(dvalues, axis = 0, keepdims = True)
 
         if self.weight_regularizer_l1 > 0:
-             dL1 = np.ones_like(self.weights)
+             dL1 = cp.ones_like(self.weights)
              dL1 [self.weights < 0] = -1
              self.dweights += self.weight_regularizer_l1 * dL1
         
@@ -271,7 +368,7 @@ class Layer_Dense:
              self.dweights += 2 * self.weight_regularizer_l2 * self.weights
 
         if self.bias_regularizer_l1 > 0:
-             dL1 = np.ones_like(self.biases)
+             dL1 = cp.ones_like(self.biases)
              dL1 [self.biases < 0 ] = -1
              self.dbiases += self.bias_regularizer_l1 * dL1 
         
@@ -279,9 +376,7 @@ class Layer_Dense:
              self.dbiases += 2* self.bias_regularizer_l2 * self.biases
 
         #Gradient on values
-        self.dinputs = np.dot(dvalues, self.weights.T)
-
-        #self.dinputs
+        self.dinputs = cp.dot(dvalues, self.weights.T)
 
     def get_parameters(self):
         #pass We'll let Model call this function 
@@ -291,7 +386,7 @@ class Layer_Dense:
         self.weights = weights
         self.biases = biases
         
-class Layer_Dropout:
+class Dropout:
     def __init__(self, rate):
         #We write rate as the success rate. The dropout rate will then be 
         self.rate = 1 - rate
@@ -301,16 +396,19 @@ class Layer_Dropout:
         self.inputs = inputs
         if not training:
             self.output = inputs.copy()
-            return
-        self.binary_mask = np.random.binomial(1, self.rate, size = inputs.shape) \
+            return self.output
+        self.binary_mask = cp.random.binomial(1, self.rate, size = inputs.shape) \
                         / self.rate
         self.output = self.binary_mask * self.inputs
+
         return self.output
+    
     def backward(self, dvalues):
         self.dinputs = dvalues * self.binary_mask 
 
-class Layer_Dropout_Spatial: 
+class SpatialDropout: 
     def __init__(self, rate):
+        
         self.rate = rate
         self.keep_prob = 1 - rate
 
@@ -321,7 +419,7 @@ class Layer_Dropout_Spatial:
             self.output = inputs.copy()
             return self.output
         C = self.inputs.shape[-1]
-        self.channel_mask = np.random.binomial(1, self.keep_prob, size = (1, 1, 1, C)) \
+        self.channel_mask = cp.random.binomial(1, self.keep_prob, size = (1, 1, 1, C)) \
                             / self.keep_prob
         self.output = inputs * self.channel_mask
 
@@ -329,16 +427,14 @@ class Layer_Dropout_Spatial:
     
     def backward(self, dvalues): 
         self.dinputs = dvalues * self.channel_mask
-        
 
 class ReLU:
 
     def forward(self, inputs, training):
         self.inputs = inputs
-        self.output = np.maximum(0, inputs)
-
+        self.output = cp.maximum(0, inputs)
         return self.output
-    
+
     def backward(self, dvalues):
         self.dinputs = dvalues.copy()
         self.dinputs[self.inputs < 0] = 0 
@@ -349,10 +445,9 @@ class Leaky_ReLU:
     
     def forward(self, inputs, training):
         self.inputs = inputs
-        self.output = np.where(inputs > 0, inputs, self.alpha * inputs)
-        
+        self.output = cp.where(inputs > 0, inputs, self.alpha * inputs)
         return self.output
-    
+
     def backward(self, dvalues):
         self.dinputs = dvalues.copy()
         self.dinputs[self.inputs < 0] *= self.alpha
@@ -362,8 +457,8 @@ class Batch_Norm:
         self.epsilon = epsilon
         self.momentum = momentum
         if n_features is not None:
-            self.gamma = np.ones(n_features, dtype=np.float32)
-            self.beta = np.zeros(n_features, dtype=np.float32)
+            self.gamma = cp.ones(n_features, dtype=cp.float32)
+            self.beta = cp.zeros(n_features, dtype=cp.float32)
         else:
             self.gamma = None
             self.beta = None
@@ -376,16 +471,16 @@ class Batch_Norm:
         self.weight_regularizer_l2 = 0
         self.bias_regularizer_l1 = 0
         self.bias_regularizer_l2 = 0
-    
+
     def forward(self, inputs, training):
-        self.inputs = inputs
-        
+        self.inputs = inputs        
+
         if self.gamma is None: 
             C = inputs.shape[-1]
-            self.gamma = np.ones(C, dtype=np.float32)
-            self.beta = np.zeros(C, dtype=np.float32)
-            self.running_mean = np.zeros(C, dtype=np.float32)
-            self.running_var = np.ones(C, dtype=np.float32)
+            self.gamma = cp.ones(C, dtype=cp.float32)
+            self.beta = cp.zeros(C, dtype=cp.float32)
+            self.running_mean = cp.zeros(C, dtype=cp.float32)
+            self.running_var = cp.ones(C, dtype=cp.float32)
             self.weights = self.gamma
             self.biases = self.beta
 
@@ -395,10 +490,10 @@ class Batch_Norm:
             axis = 0
         
         if training: 
-            self.batch_mean = np.mean(inputs, axis = axis, keepdims = True)
-            self.batch_var = np.var(inputs, axis = axis, keepdims = True)
+            self.batch_mean = cp.mean(inputs, axis = axis, keepdims = True)
+            self.batch_var = cp.var(inputs, axis = axis, keepdims = True)
 
-            self.normalized = (inputs - self.batch_mean) / np.sqrt(self.batch_var + self.epsilon)
+            self.normalized = (inputs - self.batch_mean) / cp.sqrt(self.batch_var + self.epsilon)
             self.output = self.gamma * self.normalized + self.beta
 
             #now update the running statistics
@@ -406,38 +501,55 @@ class Batch_Norm:
             self.running_var = self.momentum * self.running_var + (1 - self.momentum) * self.batch_var
         
         else:
-            self.normalized = (inputs - self.running_mean) / np.sqrt(self.running_var + self.epsilon)
+            self.normalized = (inputs - self.running_mean) / cp.sqrt(self.running_var + self.epsilon)
             self.output = self.gamma * self.normalized + self.beta
 
         return self.output 
     
     def backward(self, dvalues):
         axes = (0, 1, 2) if dvalues.ndim == 4 else (0,)
-        N_total = np.prod([self.inputs.shape[ax] for ax in axes])
+        N_total = cp.prod(cp.array([self.inputs.shape[ax] for ax in axes]))
 
         dhatx = dvalues * self.gamma # same shape as (N, H, W, C)
 
-        dvar = np.sum(dhatx * (self.inputs - self.batch_mean)
+        dvar = cp.sum(dhatx * (self.inputs - self.batch_mean)
                     * (-0.5)
-                    * np.power(self.batch_var + self.epsilon, -1.5),
+                    * cp.power(self.batch_var + self.epsilon, -1.5),
                     axis = axes,
                     keepdims = True)
 
-        dmu = np.sum(dhatx * (-1.0 / np.sqrt(self.batch_var + self.epsilon)),
+        dmu = cp.sum(dhatx * (-1.0 / cp.sqrt(self.batch_var + self.epsilon)),
                     axis = axes, keepdims = True) \
-                    + dvar * np.sum(-2.0 * (self.inputs - self.batch_mean),
+                    + dvar * cp.sum(-2.0 * (self.inputs - self.batch_mean),
                     axis = axes, keepdims = True) / N_total
 
-        inv_sqrt = 1.0 / np.sqrt(self.batch_var + self.epsilon) #shape (1, 1, 1, C)
+        inv_sqrt = 1.0 / cp.sqrt(self.batch_var + self.epsilon) #shape (1, 1, 1, C)
         self.dinputs = (dhatx * inv_sqrt + dvar * 2.0 * (self.inputs - self.batch_mean) / N_total \
                 + dmu / N_total)
         
-        #formerly dgamma and dbeta
-        self.dweights = np.sum(dvalues * self.normalized, axis=axes)
-        self.dbiases = np.sum(dvalues, axis=axes)
+        self.dweights = cp.sum(dvalues * self.normalized, axis=axes)
+        self.dbiases = cp.sum(dvalues, axis=axes)
 
         return self.dinputs 
     
+    def get_parameters(self):
+        return (
+            self.gamma,
+            self.beta,
+            self.running_mean,
+            self.running_var
+        )
+
+    def set_parameters(self, gamma, beta, running_mean, running_var):
+        self.gamma = gamma
+        self.beta = beta
+        self.running_mean = running_mean
+        self.running_var = running_var
+
+        # keep internal references consistent
+        self.weights = self.gamma
+        self.biases  = self.beta
+
 class Flatten:
     def forward(self, inputs, training):
         # Save shape so we can restore it in backward pass
@@ -453,38 +565,37 @@ class Flatten:
 
 class SoftMax:
     def forward(self, inputs, training):
-        self.exp_values = np.exp(inputs - np.max(inputs, axis=1, keepdims = True)) #e**(inputs - max(inputs by row))
-        probabilities = self.exp_values / np.sum(self.exp_values, axis=1, keepdims = True) #e**k / sum(e**k) 
+        self.exp_values = cp.exp(inputs - cp.max(inputs, axis=1, keepdims = True)) #e**(inputs - max(inputs by row))
+        probabilities = self.exp_values / cp.sum(self.exp_values, axis=1, keepdims = True) #e**k / sum(e**k) 
         self.output = probabilities
 
         return self.output
-    
+
     def backward(self, dvalues):                #Doing this function is expensive. If we combine loss and softmax we can get a simpler function. 
-        self.dinputs = np.empty_like(dvalues) 
+        self.dinputs = cp.empty_like(dvalues) 
 
         for index, (single_output, single_dvalues) in \
             enumerate(zip(self.output, dvalues)): 
             #Flatten output array 
             single_output = single_output.reshape(-1, 1) 
             #Jacobian matrix
-            jacobian = np.diagflat(single_output) - \
-                       np.dot(single_output, single_output.T)
+            jacobian = cp.diagflat(single_output) - \
+                       cp.dot(single_output, single_output.T)
             #Get sample-wise gradient 
-            self.dinputs[index] = np.dot(jacobian, single_dvalues)     
+            self.dinputs[index] = cp.dot(jacobian, single_dvalues)     
 
     def predictions(self, outputs):
-
-        return np.argmax(outputs, axis = 1) #return the max of the rows
-
+        return cp.argmax(outputs, axis = 1) #return the max of the rows
+    
 class Loss: 
     def remember_trainable_layers(self, trainable_layers):
         self.trainable_layers = trainable_layers
 
-    def calculate(self, output, y, *, include_regularization= False):
-        sample_losses = self.forward(output, y) #calc sample losses
-        data_loss = np.mean(sample_losses)      #calc mean/average losses
+    def calculate(self, output, y, *, include_regularization= False, training = True):
+        sample_losses = self.forward(output, y, training) #calc sample losses
+        data_loss = cp.mean(sample_losses)      #calc mean/average losses
 
-        self.accumulated_sum += np.sum(sample_losses)
+        self.accumulated_sum += cp.sum(sample_losses)
         self.accumulated_count += len(sample_losses)
 
         if not include_regularization:
@@ -510,16 +621,16 @@ class Loss:
         for layer in self.trainable_layers:        
             if layer.weight_regularizer_l1 > 0:
                 regularization_loss += layer.weight_regularizer_l1 * \
-                                        np.sum(np.abs(layer.weights))
+                                        cp.sum(cp.abs(layer.weights))
             if layer.weight_regularizer_l2 > 0:
                 regularization_loss += layer.weight_regularizer_l2 * \
-                                        np.sum(layer.weights * layer.weights)
+                                        cp.sum(layer.weights * layer.weights)
             if layer.bias_regularizer_l1 > 0:
                 regularization_loss += layer.bias_regularizer_l1 * \
-                                        np.sum(np.abs(layer.biases))
+                                        cp.sum(cp.abs(layer.biases))
             if layer.bias_regularizer_l2 > 0:
                 regularization_loss += layer.bias_regularizer_l2 * \
-                                        np.sum(layer.biases * layer.biases) 
+                                        cp.sum(layer.biases * layer.biases) 
         return regularization_loss
 
 class Loss_CategoricalCrossEntropy(Loss): 
@@ -530,10 +641,10 @@ class Loss_CategoricalCrossEntropy(Loss):
         #num samples in batch
         n_classes = y_pred.shape[1]
         #next lets clip before continuing
-        y_pred_clip = np.clip(y_pred, 1e-7, 1 - 1e-7) #.000001 -> .999999
+        y_pred_clip = cp.clip(y_pred, 1e-7, 1 - 1e-7) #.000001 -> .999999
 
         if len(y_true.shape) == 1:                    #scale vector [0, 1, 2]
-            y_true = np.eye(n_classes)[y_true]
+            y_true = cp.eye(n_classes)[y_true]
             
         #apply label smoothing if used
         if self.label_smoothing > 0 and training:
@@ -541,7 +652,7 @@ class Loss_CategoricalCrossEntropy(Loss):
                     self.label_smoothing / n_classes
         
         #standard CE loss
-        loss = -np.sum(y_true * np.log(y_pred_clip), axis = 1)
+        loss = -cp.sum(y_true * cp.log(y_pred_clip), axis = 1)
         
         return loss
     
@@ -555,7 +666,7 @@ class Loss_CategoricalCrossEntropy(Loss):
 
             #create a lookup table of n_classesxnclasses
             # with indexes y_true where y_true = 1xn 
-            y_true = np.eye(n_classes)[y_true]
+            y_true = cp.eye(n_classes)[y_true]
 
         #apply label smoothing again to match foward pass
         if self.label_smoothing > 0:
@@ -584,7 +695,7 @@ class Activation_Softmax_Loss_CategoricalCrossEntropy():
         #if dataset is sparse, create one hot, 
         #else if one hot already then don't convert
         if len(y_true.shape) == 1:                      
-            y_true = np.eye(n_classes, dtype = np.float32)[y_true]
+            y_true = cp.eye(n_classes, dtype = cp.float32)[y_true]
         
         if self.label_smoothing > 0 and training:
             y_true = y_true * (1.0 - self.label_smoothing) \
@@ -615,10 +726,10 @@ class Optimizer_Adam:
             (1. / (1. + self.decay * self.iterations))
     def update_parameters(self, layer):
         if not hasattr(layer, "weight_cache"): #layer with column weight cache
-            layer.weight_momentums = np.zeros_like(layer.weights)
-            layer.weight_cache = np.zeros_like(layer.weights)
-            layer.bias_momentums = np.zeros_like(layer.biases)
-            layer.bias_cache = np.zeros_like(layer.biases)
+            layer.weight_momentums = cp.zeros_like(layer.weights)
+            layer.weight_cache = cp.zeros_like(layer.weights)
+            layer.bias_momentums = cp.zeros_like(layer.biases)
+            layer.bias_cache = cp.zeros_like(layer.biases)
 
         #self.beta_1 tends to zero once corrected
         layer.weight_momentums = self.beta_1 * layer.weight_momentums + \
@@ -642,9 +753,9 @@ class Optimizer_Adam:
             (1 - self.beta_2 ** (self.iterations + 1)) 
         
         layer.weights += -self.current_learning_rate * weight_momentums_corrected / \
-            (np.sqrt(weight_cache_corrected) + self.epsilon)
+            (cp.sqrt(weight_cache_corrected) + self.epsilon)
 
         layer.biases += -self.current_learning_rate * bias_momentums_corrected / \
-            (np.sqrt(bias_cache_corrected) + self.epsilon)
+            (cp.sqrt(bias_cache_corrected) + self.epsilon)
     def post_update_parameters(self):
         self.iterations += 1

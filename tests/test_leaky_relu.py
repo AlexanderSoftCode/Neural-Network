@@ -1,0 +1,172 @@
+import unittest
+
+from aether.config import set_backend
+import aether.config as config
+
+from aether.blocks.activations import LeakyReLU
+TARGET_LAYER = LeakyReLU
+
+backends_to_test = ['numpy']
+try:
+    import cupy as cp
+    backends_to_test.append('cupy')
+
+except (ImportError, Exception):
+    pass
+
+def make_suite(backend_name, Layer_Class):
+    class TestLeakyReLU(unittest.TestCase):
+        def setUp(self):
+            # Function from aether.config.py 
+            set_backend(backend_name=backend_name)
+            self.xp = config.xp
+
+            self.layer = Layer_Class(alpha = 0.1)
+
+            # If a backend requires seperate functions, mimic Model.to
+            if hasattr(self.layer, '_compile_for_device'):
+                self.layer._compile_for_device(backend_name)
+        
+        def test_forward_pass(self):
+            """Verify output values for leaky_ReLU"""            
+            # Setup input with negative, zero, and positive values
+            inputs = self.xp.array([
+                [-3.0, -1.0, 0.0], 
+                [0.5, 2.0, 5.0]
+            ], dtype=self.xp.float32)
+
+            expected_output = self.xp.array([
+                [-0.3, -0.1, 0.0],
+                [0.5, 2.0, 5.0]
+            ], dtype =self.xp.float32)
+
+            actual_output = self.layer.forward(inputs, training=True)
+
+            self.xp.testing.assert_array_almost_equal(
+                actual_output,
+                expected_output,
+                decimal=4,
+                err_msg="Forward pass failed: did not clamp negative values correctly"
+            )
+
+        def test_analytical_gradients_backward_pass(self): 
+            """Verify that gradients flow through input paths ."""
+
+            # inputs to dictate the active/inactive mask
+            inputs = self.xp.array([
+                [-2.0, 0.0, 1.0, 3.0],
+                [-4.0, 5.0, 10.0, -15.0]
+            ], dtype=self.xp.float32)
+
+            # Upstream gradients received from the next layaer
+
+            dvalues = self.xp.array([
+                [0.5, 0.5, 0.5, 0.5],
+                [1.0, 1.0, 1.0, 1.0]
+            ], dtype=self.xp.float32)
+
+            # Expected x for x>0, expected alpha*x for x<0
+            expected_dinputs = self.xp.array([
+                [0.05, 0.05, 0.5, 0.5],
+                [0.1, 1.0, 1.0, 0.1]
+            ], dtype=self.xp.float32)
+
+            self.layer.forward(inputs)
+            self.layer.backward(dvalues)
+
+            actual_dinputs = self.layer.dinputs 
+
+            self.xp.testing.assert_array_almost_equal(
+                actual_dinputs,
+                expected_dinputs,
+                decimal=4,
+                err_msg="Backward pass failed: gradient routing mismatch"
+            )
+
+        def test_backend_pointer_swap(self):
+            """Verify that LeakyReLU dynamically binds the correct
+            operational methods based on input context."""
+
+            current_forward_name = self.layer.forward.__name__
+            current_backward_name = self.layer.backward.__name__
+
+            if backend_name == 'cupy':
+                # Assert that the pointers have swapped to the ultra-fast fused GPU variants
+                self.assertEqual(
+                    current_forward_name, "_forward_gpu",
+                    msg="CuPy backend failed to bind the optimized GPU forward pointer."
+                )
+                self.assertEqual(
+                    current_backward_name, "_backward_gpu",
+                    msg="CuPy backend failed to bind the optimized GPU backward pointer."
+                )
+            else:
+                # Assert that the pointers default cleanly to standard host CPU branches
+                self.assertEqual(
+                    current_forward_name, "_forward_fallback",
+                    msg="NumPy backend failed to bind the host CPU forward pointer."
+                )
+                self.assertEqual(
+                    current_backward_name, "_backward_fallback",
+                    msg="NumPy backend failed to bind the host CPU backward pointer."
+                )
+        
+        def test_gradient_memory_safety(self):
+            """ Verify backward pass does not alter the incoming dvalues tensor in-place."""
+            inputs = self.xp.array([
+                [-2.0, 0.0, 1.0, 3.0],
+                [ 0.5, -1.0, 2.0, -0.5]
+            ], dtype=self.xp.float32)
+
+            dvalues = self.xp.array([
+                [0.5, 0.5, 0.5, 0.5],
+                [1.0, 1.0, 1.0, 1.0]
+            ], dtype=self.xp.float32)
+
+            desired_dvalues = dvalues.copy()
+            self.layer.forward(inputs)
+            self.layer.backward(dvalues)
+
+            self.xp.testing.assert_array_equal(
+                desired_dvalues,
+                dvalues,
+                err_msg="Framework VRAM leakage/corruption: dvalues is " \
+                " being mutated in-place during the backward pass."
+            )
+        def tearDown(self):
+            """Reset tracking state to system NumPy default safely between tests."""
+            set_backend(backend_name='numpy')
+    
+        def test_custom_alpha_scaling(self):
+            """Verify hyperparameter integrity"""
+            custom_alpha = 0.25
+            custom_layer = LeakyReLU(alpha = 0.25)
+
+            if hasattr(custom_layer, '_compile_for_device'):
+                custom_layer._compile_for_device(backend_name)
+        
+            inputs = self.xp.array([[-2.0, -4.0]], dtype=self.xp.float32)
+            expected_output = self.xp.array([[-0.5, -1.0]], dtype=self.xp.float32)
+
+            custom_layer.forward(inputs)
+
+            self.xp.testing.assert_array_almost_equal(
+                custom_layer.output,
+                expected_output,
+                decimal=4,
+                err_msg=f"Hyperparameter initialization mismatch: Custom alpha scaling failed to apply value {custom_alpha} properly."
+            )
+        def tearDown(self):
+            """Reset tracking state to system NumPy default safely between tests."""
+            if config.HAS_CUPY:
+                cp.cuda.Stream.null.synchronize()
+                cp.get_default_memory_pool().free_all_blocks()
+                cp.get_default_pinned_memory_pool().free_all_blocks()
+            set_backend(backend_name='numpy')
+    return TestLeakyReLU
+
+for backend in backends_to_test:
+    
+    class_name = f"Test_{TARGET_LAYER.__name__}_{backend.upper()}"
+
+    globals()[class_name] = make_suite(backend_name=backend, Layer_Class=TARGET_LAYER)

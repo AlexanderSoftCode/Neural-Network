@@ -1,6 +1,7 @@
+#classes
 import copy
 import pickle
-from CNN.models.CNN_classes_cupy import * 
+from aether.blocks.CNN_classes import * 
 
 class Model:
 
@@ -56,7 +57,7 @@ class Model:
         if self.loss is not None:
             self.loss.remember_trainable_layers(self.trainable_layers)
 
-        
+
         if isinstance(self.layers[-1], SoftMax) and \
             isinstance(self.loss, Loss_CategoricalCrossEntropy):
             #create an object of combined activation and loss functions
@@ -108,8 +109,7 @@ class Model:
                 #Loss
                 data_loss, regularization_loss = \
                     self.loss.calculate(output, batch_y,
-                                        include_regularization = True,
-                                        training = True)
+                                        include_regularization = True)
                 
                 loss = data_loss + regularization_loss
                 
@@ -168,7 +168,7 @@ class Model:
             #First call backward method on the
             #combined activation/loss this will set 
             #dinputs properly
-            self.softmax_classifier_output.backward(output, y, training = True)
+            self.softmax_classifier_output.backward(output, y)
 
             #since we'll not call backward method of the last layer
             #aka softmax since we're using combined activation/loss
@@ -186,12 +186,13 @@ class Model:
         #First call the backwards method on loss
         #This will set dinputs property that the last layer
         #will access
-        self.loss.backward(output, y, training = True )
+        self.loss.backward(output, y)
 
         #Class backward method going through all the objects in reverse order
         for layer in reversed(self.layers):
             layer.backward(layer.next.dinputs)
-   
+            
+
     def backward_debug(self, X, y):
         # Forward pass to set outputs
         out = X
@@ -248,7 +249,7 @@ class Model:
                 batch_y = y_val[step * batch_size:(step+1)*batch_size]
             
             output = self.forward(batch_X, training = False)
-            self.loss.calculate(output, batch_y, training = False)
+            self.loss.calculate(output, batch_y)
             predictions = self.output_layer_activation.predictions(output)
             self.accuracy.calculate(predictions, batch_y)
 
@@ -281,7 +282,7 @@ class Model:
         with open(path, 'wb') as f:
             pickle.dump(self.get_parameters(), f)
     
-    def load_parameters(self, path):
+    def load_paramters(self, path):
 
         #Open a file in binary-read mode
         #and load weightss and update training layers
@@ -339,7 +340,7 @@ class Model:
             output.append(batch_output)
         
         #stack and return results
-        return cp.vstack(output)
+        return np.vstack(output)
     
 class Accuracy:
     #Givers the accuracy of the prediction sand truth values
@@ -347,9 +348,9 @@ class Accuracy:
 
         comparisons = self.compare(predictions, y)
 
-        accuracy = cp.mean(comparisons) 
+        accuracy = np.mean(comparisons) 
     
-        self.accumulated_sum += cp.sum(comparisons)
+        self.accumulated_sum += np.sum(comparisons)
         self.accumulated_count += len(comparisons)
 
     
@@ -372,10 +373,10 @@ class Accuracy_Regression(Accuracy):
     #Now we are getting the precision value
     def init(self, y, reinit = False):
         if self.precision is None or reinit:
-            self.precision = cp.std(y) / 250 
+            self.precision = np.std(y) / 250 
     
     def compare(self, predictions, y):
-        return cp.absolute(predictions - y) < self.precision
+        return np.absolute(predictions - y) < self.precision
 
 class Accuracy_Categorical(Accuracy):
     def init(self, y):
@@ -383,7 +384,7 @@ class Accuracy_Categorical(Accuracy):
     
     def compare(self, predictions, y):
         if len(y.shape) == 2:
-            y = cp.argmax(y, axis = 1)
+            y = np.argmax(y, axis = 1)
         return predictions == y
     
 class Layer_Input: 
