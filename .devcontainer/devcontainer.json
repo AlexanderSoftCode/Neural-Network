@@ -37,5 +37,16 @@
     "postCreateCommand": "pip install --upgrade pip",
 
     // 6. Ensure root execution access across system container volumes
-    "remoteUser": "root"
+    "remoteUser": "root",
+
+    "portsAttributes": {
+        "8888": {
+            "label": "Jupyter Lab Server",
+            "onAutoForward": "notify"
+        }, 
+        // The catch-all rule: ignore every other port that attempts to auto-forward
+        "otherPorts": {
+            "onAutoForward": "ignore"
+        }
+    }
 }

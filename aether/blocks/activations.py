@@ -79,7 +79,7 @@ class SoftMax(Layer):
     def forward(self, inputs, training):
         xp = config.get_array_module(inputs)
         exp_values = xp.exp(inputs - xp.max(inputs, axis=1, keepdims = True)) #e**(inputs - max(inputs by row))
-        probabilities = self.exp_values / xp.sum(exp_values, axis=1, keepdims = True) #e**k / sum(e**k) 
+        probabilities = exp_values / xp.sum(exp_values, axis=1, keepdims = True) #e**k / sum(e**k) 
         self.output = probabilities
 
         return self.output
