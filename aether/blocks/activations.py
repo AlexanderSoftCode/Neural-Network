@@ -74,45 +74,22 @@ class LeakyReLU(Layer):
         self.dinputs = dvalues * (1.0 - (self.output <= 0) * (1.0 - self.alpha))
         return self.dinputs
 
-try: 
-    import cupy as cp
-    @cp.fuse()
-    def _fused_operation(x, alpha):
-        return cp.maximum(0, x) + alpha * cp.minimum(0, x)
-except (ImportError, Exception):
-    _fused_operation = None
-
 class SoftMax(Layer):
 
-    def _compile_for_device(self, device):
-        """Triggered by Model.to(device) to map low-level hardware paths"""
-        if device == 'cupy' and _fused_operation is not None:
-            self.forward = self._forward_gpu   
-            self.backward = self._backward_gpu
-        else:
-            self.forward = self._forward_fallback
-            self.backward = self._backward_fallback
     def forward(self, inputs, training):
-        self.exp_values = cp.exp(inputs - cp.max(inputs, axis=1, keepdims = True)) #e**(inputs - max(inputs by row))
-        probabilities = self.exp_values / cp.sum(self.exp_values, axis=1, keepdims = True) #e**k / sum(e**k) 
+        xp = config.get_array_module(inputs)
+        exp_values = xp.exp(inputs - xp.max(inputs, axis=1, keepdims = True)) #e**(inputs - max(inputs by row))
+        probabilities = self.exp_values / xp.sum(exp_values, axis=1, keepdims = True) #e**k / sum(e**k) 
         self.output = probabilities
 
         return self.output
 
-    # Calculating the Jacobian is expensive, so we'll combine softmax and CCE loss and overwrite this method
-    # when both are present at the same time. 
+    # A vectorized pass of the SoftMax backwards pass
     def backward(self, dvalues): 
-        self.dinputs = cp.empty_like(dvalues) 
-
-        for index, (single_output, single_dvalues) in \
-            enumerate(zip(self.output, dvalues)): 
-            #Flatten output array 
-            single_output = single_output.reshape(-1, 1) 
-            #Jacobian matrix
-            jacobian = cp.diagflat(single_output) - \
-                       cp.dot(single_output, single_output.T)
-            #Get sample-wise gradient 
-            self.dinputs[index] = cp.dot(jacobian, single_dvalues)     
+        xp = config.get_array_module(dvalues)
+        sum_dvalues_output = xp.sum(dvalues * self.output, axis = -1, keepdims=True)
+        self.dinputs = self.output * (dvalues - sum_dvalues_output)
 
     def predictions(self, outputs):
-        return cp.argmax(outputs, axis = 1) #return the max of the rows
+        xp = config.get_array_module(outputs)
+        return xp.argmax(outputs, axis = 1) #return the max of the rows
