@@ -15,7 +15,7 @@ class ReLU(Layer):
 
 @config.fuse_kernel()
 def _fused_leaky_relu_forward(x, alpha):
-    return config.cp.maximum(0, x) + alpha * cp.minimum(0, x)
+    return config.cp.maximum(0, x) + alpha * config.cp.minimum(0, x)
 
 @config.fuse_kernel()
 def _fused_leaky_relu_backward(dvalues, output, alpha):

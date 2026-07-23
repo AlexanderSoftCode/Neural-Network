@@ -1,6 +1,4 @@
 # Template for writing a test file for a layer
-import unittest
-
 # Core Framework Configuration Imports
 from aether.config import set_backend, get_stride_utility
 import aether.config as config

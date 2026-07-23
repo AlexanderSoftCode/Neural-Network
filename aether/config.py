@@ -71,8 +71,9 @@ def fuse_kernel(*fuse_args, **fuse_kwargs):
         try:
             return cp.fuse(*fuse_args, **fuse_kwargs)(func)
         except Exception as e:
-            warnings.warn(f"[aether] fuse_kernel: '{func.__name}' failed to compile \n {e} ")
+            warnings.warn(f"[aether] fuse_kernel: '{func.__name__}' failed to compile \n {e} ")
             return None
+    return decorator
 
 def build_kernel(factory, name=None):
     """
@@ -81,7 +82,8 @@ def build_kernel(factory, name=None):
     the actual construction, deferred so it's never evaluated while cp is None.
     
     EX: _leaky_relu_ew = config.build_kernel(lambda: config.cp.ElementwiseKernel(
-    ...), 
+    ...),
+        '_leaky_relu_ew' 
     )
     """
     if not HAS_CUPY:

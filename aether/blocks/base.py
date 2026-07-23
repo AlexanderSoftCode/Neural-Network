@@ -2,6 +2,9 @@ import numpy as np
 import aether.config as config
 
 class Layer:
+    def __init__(self, seed): 
+        self.seed = seed
+
     def _compile_for_device(self, device):
         """
         Hook for layers utilizing fused modules to 
@@ -38,4 +41,4 @@ class Layer:
             spawn_key = ()
         
         seed_seq = np.random.SeedSequence(entropy, spawn_key=spawn_key)
-        return int(seed_seq.generate_state(1, dtype=np.uint64[0]))
+        return int(seed_seq.generate_state(1, dtype=np.uint64)[0])

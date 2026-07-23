@@ -158,7 +158,7 @@ def make_suite(backend_name, Layer_Class):
             )
 
     TestLeakyReLU.__name__ = class_name
-    TestLeakyReLU.__name__ = class_name
+    TestLeakyReLU.__qualname__ = class_name
     return TestLeakyReLU
 
 for backend in backends_to_test:
