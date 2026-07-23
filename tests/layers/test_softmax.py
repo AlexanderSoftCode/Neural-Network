@@ -1,8 +1,7 @@
-from aether.config import set_backend
 import aether.config as config
 from tests.base_case import AetherBaseTestCase
 
-from aether.blocks.activations import SoftMax
+from aether.layers.activations import SoftMax
 TARGET_LAYER = SoftMax
 
 backends_to_test = ['numpy']
@@ -18,7 +17,7 @@ def make_suite(backend_name, Layer_Class):
     class TestSoftMax(AetherBaseTestCase):
         def setUp(self):
 
-            set_backend(backend_name=backend_name)
+            config.set_backend(backend_name=backend_name)
             self.xp = config.xp
 
             self.layer = Layer_Class()

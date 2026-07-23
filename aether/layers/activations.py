@@ -1,6 +1,6 @@
 import numpy as np
 import aether.config as config
-from aether.blocks.base import Layer
+from aether.base import Layer
 
 class ReLU(Layer):
 

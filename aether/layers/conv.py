@@ -1,6 +1,6 @@
 import numpy as np
 import aether.config as config
-from aether.blocks.base import Layer
+from aether.base import Layer
 class Conv(Layer):
     def __init__(self, input_shape, num_filters = 1, filter_size = (3, 3), strides = (1, 1), padding = "same"):
 
@@ -85,7 +85,7 @@ class Conv(Layer):
 
         # Keep the samples, h_out, w_out, and the number of channels out. 
         # But, iterate over the patch(x, y) with channels c, and with the number of filters d
-        self.output = xp.einsum('shwxyc,xycd->shwd', self.patches, self.filter_weights)
+        self.output = xp.einsum('shwxyc,xycd->shwd', self.patches, self.filter_weights, optimize=True)
         self.output += self.biases.reshape((1, 1, 1, self.num_filters)) 
 
         self.inputs = inputs

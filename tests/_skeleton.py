@@ -5,7 +5,7 @@ import aether.config as config
 from tests.base_case import AetherBaseTestCase
 
 # Replace this with your specific layout import
-from aether.blocks.conv import Conv
+from aether.layers.conv import Conv
 TARGET_LAYER = Conv
 
 backends_to_test = ['numpy']

@@ -5,7 +5,7 @@ from aether.config import set_backend
 import aether.config as config
 from tests.base_case import AetherBaseTestCase
 
-from aether.blocks.linear import Dense
+from aether.layers.linear import Dense
 TARGET_LAYER = Dense
 
 backends_to_test = ['numpy']

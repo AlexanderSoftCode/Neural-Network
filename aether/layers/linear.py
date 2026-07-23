@@ -1,6 +1,6 @@
 import numpy as np
 import aether.config as config
-from aether.blocks.base import Layer
+from aether.base import Layer
 class Dense(Layer):
     def __init__(self, n_inputs, n_neurons, weight_regularizer_l1 = 0,
                  bias_regularizer_l1 = 0, weight_regularizer_l2 = 0,

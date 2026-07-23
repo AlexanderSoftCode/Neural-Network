@@ -1,11 +1,7 @@
-import unittest
-import numpy as np 
-
-from aether.config import set_backend
 import aether.config as config
 from tests.base_case import AetherBaseTestCase
 
-from aether.blocks.activations import ReLU
+from aether.layers.activations import ReLU
 TARGET_LAYER = ReLU
 
 backends_to_test = ['numpy']
@@ -21,7 +17,7 @@ def make_suite(backend_name, Layer_Class):
     class_name = f"Test_{Layer_Class.__name__}_{backend_name.upper()}"
     class TestReLU(AetherBaseTestCase):
         def setUp(self):
-            set_backend(backend_name=backend_name)
+            config.set_backend(backend_name=backend_name)
             self.xp = config.xp
             
             self.layer = Layer_Class()

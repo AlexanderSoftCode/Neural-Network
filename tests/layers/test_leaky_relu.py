@@ -1,10 +1,7 @@
-import unittest
-
-from aether.config import set_backend
 import aether.config as config
 from tests.base_case import AetherBaseTestCase
 
-from aether.blocks.activations import LeakyReLU
+from aether.layers.activations import LeakyReLU
 TARGET_LAYER = LeakyReLU
 
 backends_to_test = ['numpy']
@@ -21,7 +18,7 @@ def make_suite(backend_name, Layer_Class):
     class TestLeakyReLU(AetherBaseTestCase):
         def setUp(self):
             # Function from aether.config.py 
-            set_backend(backend_name=backend_name)
+            config.set_backend(backend_name=backend_name)
             self.xp = config.xp
 
             self.layer = Layer_Class(alpha = 0.1)
