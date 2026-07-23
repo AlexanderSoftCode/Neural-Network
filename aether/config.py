@@ -1,4 +1,5 @@
 import numpy as np
+import warnings
 
 # default backend incase user does not have CuPy package
 xp = np
@@ -57,3 +58,36 @@ def set_backend(backend_name):
         as_strided = np.lib.stride_tricks.as_strided
     else:
         raise ValueError(f"Unknown backend configuration context: {backend_name}")
+
+def fuse_kernel(*fuse_args, **fuse_kwargs):
+    """
+    Decorator for cp.fuse'd elementwise kernels. Binds the name to a
+    working fused callable when CuPy is available and custruction succeeds.
+    """
+
+    def decorator(func):
+        if not HAS_CUPY:
+            return None
+        try:
+            return cp.fuse(*fuse_args, **fuse_kwargs)(func)
+        except Exception as e:
+            warnings.warn(f"[aether] fuse_kernel: '{func.__name}' failed to compile \n {e} ")
+            return None
+
+def build_kernel(factory, name=None):
+    """
+    Used for kernel objects that aren't a decorated function ex.ElementwiseKernel,
+    cp.ReductionKernel, cp.RawKernel. 'factory' is a zero-arg callable that performs
+    the actual construction, deferred so it's never evaluated while cp is None.
+    
+    EX: _leaky_relu_ew = config.build_kernel(lambda: config.cp.ElementwiseKernel(
+    ...), 
+    )
+    """
+    if not HAS_CUPY:
+        return None
+    try:
+        return factory()
+    except Exception as e:
+        warnings.warn(f"[aether] build_kernel: '{name or getattr(factory, '__name__', '?')}' failed to compile: {e}")
+        return None

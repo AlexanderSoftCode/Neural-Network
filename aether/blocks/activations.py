@@ -13,30 +13,20 @@ class ReLU(Layer):
         self.dinputs = dvalues * (self.output > 0)
         return self.dinputs
 
+@config.fuse_kernel()
+def _fused_leaky_relu_forward(x, alpha):
+    return config.cp.maximum(0, x) + alpha * cp.minimum(0, x)
 
-try: 
-    import cupy as cp
-    @cp.fuse()
-    def _fused_leaky_relu_forward(x, alpha):
-        return cp.maximum(0, x) + alpha * cp.minimum(0, x)
-except (ImportError, Exception):
-    _fused_leaky_relu_forward = None
-
-try:
-    import cupy as cp
-    @cp.fuse()
-    def _fused_leaky_relu_backward(dvalues, output, alpha):
-        # ROCm/HIP Workaround: Comparing fusion variables against raw Python literals 
-        # (e.g., output > 0) causes a type-guessing bug in modern NumPy environments, 
-        # throwing an AttributeError on AMD architectures during the AST trace.
-        # Generating a zero scalar explicitly typed by multiplying 'alpha * 0'
-        # ensures variable-to-variable comparison, bypassing weak type-promotion logic 
-        # and compiling cleanly into a branchless SIMD loop on both CUDA and HIP stacks.
-        fused_zero = alpha * 0
-        return dvalues * (1.0 - (output <= fused_zero) * (1.0 - alpha))
-except (ImportError, Exception):
-    _fused_leaky_relu_backward = None
-
+@config.fuse_kernel()
+def _fused_leaky_relu_backward(dvalues, output, alpha):
+    # ROCm/HIP Workaround: Comparing fusion variables against raw Python literals 
+    # (e.g., output > 0) causes a type-guessing bug in modern NumPy environments, 
+    # throwing an AttributeError on AMD architectures during the AST trace.
+    # Generating a zero scalar explicitly typed by multiplying 'alpha * 0'
+    # ensures variable-to-variable comparison, bypassing weak type-promotion logic 
+    # and compiling cleanly into a branchless SIMD loop on both CUDA and HIP stacks.
+    fused_zero = alpha * 0
+    return dvalues * (1.0 - (output <= fused_zero) * (1.0 - alpha))
 
 class LeakyReLU(Layer):
 
