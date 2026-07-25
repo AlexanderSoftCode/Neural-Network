@@ -2,7 +2,7 @@ import numpy as np
 import aether.config as config
 
 class Layer:
-    def __init__(self, seed): 
+    def __init__(self, seed=None): 
         self.seed = seed
 
     def _compile_for_device(self, device):

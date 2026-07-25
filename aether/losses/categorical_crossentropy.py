@@ -1,9 +1,13 @@
+import numpy as np
 import aether.config as config
 # Using Python 3.15 PEP 810: Explicit lazy imports would allow 
 # for the import below to be called lazily, however for best 
 # compatability this project would not use Python 3.15 for this issue
 from aether.layers.activations import SoftMax
 class Loss: 
+    def __init__(self):
+        self.new_pass()
+        
     def remember_trainable_layers(self, trainable_layers):
         self.trainable_layers = trainable_layers
 
@@ -53,6 +57,7 @@ class Loss:
 
 class Loss_CategoricalCrossEntropy(Loss): 
     def __init__(self, label_smoothing = 0.0):
+        super().__init__()
         self.label_smoothing = label_smoothing 
 
     def forward(self, y_pred, y_true, training = True):
@@ -97,15 +102,20 @@ class Loss_CategoricalCrossEntropy(Loss):
         #calculate CE gradient
         self.dinputs = -y_true / dvalues_clip / samples 
 
-class Activation_Softmax_Loss_CategoricalCrossEntropy():
+class Activation_Softmax_Loss_CategoricalCrossEntropy(Loss):
     def __init__(self, label_smoothing = 0.0):
         self.activation = SoftMax()
         self.loss = Loss_CategoricalCrossEntropy(label_smoothing)
         self.label_smoothing = label_smoothing
+        super().__init__()
+
+    def new_pass(self):
+        super().new_pass()
+        self.loss.new_pass()
     #y_true is the vector of correct class indices, one per sample.
     #dvalues is output of softmax layer shape(n_samples, n_classes)
     def forward(self, inputs, y_true, training = True):
-        self.activation.forward(inputs)                 #call forward function of softmax
+        self.activation.forward(inputs, training=training)                 #call forward function of softmax
         self.output = self.activation.output            #take the output as output of forward
         return self.loss.calculate(self.output, y_true, training = training) #take the loss via the ouput of softmax versus true
     
