@@ -1,6 +1,14 @@
-# Template for writing a test file for a layer
-# Core Framework Configuration Imports
-from aether.config import set_backend, get_stride_utility
+"""
+Aether-ML Unit Testing Template Skeleton
+========================================
+This template serves as a standardized blueprint for creating multi-backend 
+unit tests for layers, activations, and losses across NumPy (CPU) and CuPy (GPU).
+
+Architecture Pattern:
+- Dynamically creates test classes per backend target using factory metaprogramming (`make_suite`).
+- Registers generated classes into `globals()` so `python3 -m unittest discover` picks them up.
+- Enforces state isolation per backend using `set_backend()` and `AetherBaseTestCase`.
+"""
 import aether.config as config
 from tests.base_case import AetherBaseTestCase
 
@@ -24,14 +32,28 @@ def make_suite(backend_name, Layer_Class):
     class_name = f"Test_{Layer_Class.__name__}_{backend_name.upper()}"
     # Rewrite `TestLayer` for specific class being tested
     class TestLayer(AetherBaseTestCase):
+        # Place any constants here
+        INPUT_SHAPE = (28, 28, 1)
+        NUM_FILTERS = 4
+        FILTER_SIZE = (3, 3)
+        STRIDES = (1, 1)
+        PADDING = 'same'
+
         def setUp(self):
             # Function from aether.config.py 
-            set_backend(backend_name=backend_name)
+            config.set_backend(backend_name=backend_name)
             self.xp = config.xp
 
             # Grab extra utility imports for specific backend if needed
-            self.as_strided = get_stride_utility(self.xp)
-            self.layer = Layer_Class
+            self.as_strided = config.get_stride_utility(self.xp)
+            self.layer = Layer_Class(
+                input_shape=self.INPUT_SHAPE, 
+                num_filters=self.NUM_FILTERS,
+                filter_size=self.FILTER_SIZE, 
+                strides=self.STRIDES, 
+                padding=self.PADDING
+                )
+            self.test_images = self.xp.random.randn(2, 28, 28, 1)
 
             # If a backend requires seperate functions, mimic Model.to
             # otherwise do nothing

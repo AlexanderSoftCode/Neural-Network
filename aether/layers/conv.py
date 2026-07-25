@@ -350,27 +350,3 @@ class Pooling(Layer):
                 dinputs = dvalues_patches.sum(axis = (3,4) * scale_factor)
 
         return dinputs
-    
-class SpatialDropout(Layer): 
-    def __init__(self, rate):
-        
-        self.rate = rate
-        self.keep_prob = 1 - rate
-
-    def forward(self, inputs, training):
-        
-        xp = config.get_array_module(inputs)
-        self.inputs = inputs
-
-        if not training:
-            self.output = inputs.copy()
-            return self.output
-        C = self.inputs.shape[-1]
-        self.channel_mask = xp.random.binomial(1, self.keep_prob, size = (1, 1, 1, C)) \
-                            / self.keep_prob
-        self.output = inputs * self.channel_mask
-
-        return self.output
-    
-    def backward(self, dvalues): 
-        self.dinputs = dvalues * self.channel_mask
