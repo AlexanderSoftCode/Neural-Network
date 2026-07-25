@@ -10,7 +10,7 @@ backends_to_test = ['numpy']
 try: 
     import cupy as cp
     backends_to_test.append('cupy')
-except:
+except (ImportError, ModuleNotFoundError):
     pass
 
 def make_suite(backend_name, Layer_Class):
@@ -43,7 +43,7 @@ def make_suite(backend_name, Layer_Class):
 
             expected = self.layer.forward(logits, y_true, training=True)
 
-            self.xp.testing.assert_array_almost_equal(desired, expected, 1e-4)
+            self.xp.testing.assert_allclose(desired, expected, rtol=1e-4)
 
 
         def test_forward_matches_separate_softmax_and_cce(self):
