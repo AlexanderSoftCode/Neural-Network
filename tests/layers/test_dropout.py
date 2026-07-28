@@ -8,7 +8,7 @@ backends_to_test = ['numpy']
 try:
     import cupy as cp
     backends_to_test.append('cupy')
-except:
+except (ImportError, ModuleNotFoundError):
     pass
 
 def make_suite(backend_name, Layer_Class):
