@@ -15,6 +15,16 @@ class AetherBaseTestCase(unittest.TestCase):
     backend swaps.
     """
 
+    def make_layer(self, layer_cls, **kwargs):
+        """Construct a layer and, if it supports device compilation,
+        bind it to the currently active backend.
+        Requires self.backend_name to be set in setUp before use.
+        """
+        layer = layer_cls(**kwargs)
+        if hasattr(layer, '_compile_for_device'):
+            layer._compile_for_device(self.backend_name)
+        return layer
+    
     def tearDown(self):
         """Reset tracking state to system NumPy default safely between tests."""
         if config.HAS_CUPY:
