@@ -20,7 +20,7 @@ def make_suite(backend_name, Layer_Class):
         def setUp(self):
             config.set_backend(backend_name=backend_name)
             self.xp = config.xp
-            self.loss = Layer_Class()
+            self.layer = self.make_layer(Layer_Class)
 
         # ---------------------------------------------------------------
         # Forward
@@ -34,7 +34,7 @@ def make_suite(backend_name, Layer_Class):
             ], dtype=self.xp.float32)
             y_true = self.xp.array([0, 1])
 
-            losses = self.loss.forward(y_pred, y_true, training=True)
+            losses = self.layer.forward(y_pred, y_true, training=True)
 
             expected = -self.xp.log(self.xp.array([0.7, 0.5], dtype=self.xp.float32))
             self.xp.testing.assert_array_almost_equal(losses, expected, decimal=5)
@@ -51,8 +51,8 @@ def make_suite(backend_name, Layer_Class):
                 [1, 0, 0],
             ], dtype=self.xp.float32)
 
-            loss_sparse = self.loss.forward(y_pred, y_true_sparse, training=True)
-            loss_onehot = self.loss.forward(y_pred, y_true_onehot, training=True)
+            loss_sparse = self.layer.forward(y_pred, y_true_sparse, training=True)
+            loss_onehot = self.layer.forward(y_pred, y_true_onehot, training=True)
 
             self.xp.testing.assert_array_almost_equal(loss_sparse, loss_onehot, decimal=5)
 
@@ -64,32 +64,32 @@ def make_suite(backend_name, Layer_Class):
             ], dtype=self.xp.float32)
             y_true = self.xp.array([0, 2])
 
-            losses = self.loss.forward(y_pred, y_true, training=True)
+            losses = self.layer.forward(y_pred, y_true, training=True)
 
             self.assertFalse(self.xp.isnan(losses).any())
             self.assertFalse(self.xp.isinf(losses).any())
 
         def test_forward_label_smoothing_increases_loss_on_confident_prediction(self):
             """Label smoothing should raise the loss for an otherwise near-zero-loss prediction."""
-            smoothed = Layer_Class(label_smoothing=0.1)
+            smoothed = self.make_layer(Layer_Class, label_smoothing=0.1)
 
             y_pred = self.xp.array([[0.98, 0.01, 0.01]], dtype=self.xp.float32)
             y_true = self.xp.array([0])
 
-            plain_loss = self.loss.forward(y_pred, y_true, training=True)
+            plain_loss = self.layer.forward(y_pred, y_true, training=True)
             smoothed_loss = smoothed.forward(y_pred, y_true, training=True)
 
             self.assertGreater(float(smoothed_loss[0]), float(plain_loss[0]))
 
         def test_forward_label_smoothing_ignored_when_not_training(self):
             """Label smoothing must not apply during eval/inference."""
-            smoothed = Layer_Class(label_smoothing=0.1)
+            smoothed = self.make_layer(Layer_Class, label_smoothing=0.1)
 
             y_pred = self.xp.array([[0.98, 0.01, 0.01]], dtype=self.xp.float32)
             y_true = self.xp.array([0])
 
             eval_loss = smoothed.forward(y_pred, y_true, training=False)
-            plain_loss = self.loss.forward(y_pred, y_true, training=True)
+            plain_loss = self.layer.forward(y_pred, y_true, training=True)
 
             self.xp.testing.assert_array_almost_equal(eval_loss, plain_loss, decimal=5)
 
@@ -104,9 +104,9 @@ def make_suite(backend_name, Layer_Class):
             ], dtype=self.xp.float32)
             y_true = self.xp.array([0, 2])
 
-            self.loss.backward(y_pred, y_true)
+            self.layer.backward(y_pred, y_true)
 
-            self.assertEqual(self.loss.dinputs.shape, y_pred.shape)
+            self.assertEqual(self.layer.dinputs.shape, y_pred.shape)
 
         def test_backward_matches_formula(self):
             """dinputs should equal -y_true / clip(dvalues) / samples exactly."""
@@ -116,7 +116,7 @@ def make_suite(backend_name, Layer_Class):
             ], dtype=self.xp.float32)
             y_true = self.xp.array([0, 1])
 
-            self.loss.backward(y_pred, y_true)
+            self.layer.backward(y_pred, y_true)
 
             samples = y_pred.shape[0]
             n_classes = y_pred.shape[1]
@@ -124,7 +124,7 @@ def make_suite(backend_name, Layer_Class):
             clipped = self.xp.clip(y_pred, 1e-7, 1 - 1e-7)
             expected = -y_true_onehot / clipped / samples
 
-            self.xp.testing.assert_array_almost_equal(self.loss.dinputs, expected, decimal=5)
+            self.xp.testing.assert_array_almost_equal(self.layer.dinputs, expected, decimal=5)
 
         def test_backward_numerical_gradient_check(self):
             """Finite-difference check: dinputs should equal the true gradient of forward()."""
@@ -135,13 +135,13 @@ def make_suite(backend_name, Layer_Class):
             ], dtype=self.xp.float32)
             y_true = self.xp.array([0, 1])
 
-            self.loss.backward(y_pred, y_true)
+            self.layer.backward(y_pred, y_true)
             samples = y_pred.shape[0]
 
             def scalar_loss(preds):
                 # Sum of per-sample losses, matching the un-normalized quantity
                 # dinputs was derived from (divided by `samples` in backward).
-                return self.xp.sum(self.loss.forward(preds, y_true, training=False))
+                return self.xp.sum(self.layer.forward(preds, y_true, training=False))
 
             numerical = self.xp.zeros_like(y_pred)
             B, C = y_pred.shape
@@ -160,14 +160,14 @@ def make_suite(backend_name, Layer_Class):
             numerical /= samples
 
             self.xp.testing.assert_array_almost_equal(
-                self.loss.dinputs, numerical, decimal=3,
+                self.layer.dinputs, numerical, decimal=3,
                 err_msg="Analytical backward pass does not match the numerical gradient of forward()."
             )
 
         def test_backward_numerical_gradient_check_with_label_smoothing(self):
             """Same finite-difference check, but with label smoothing engaged on both passes."""
             epsilon = 1e-4
-            smoothed = Layer_Class(label_smoothing=0.1)
+            smoothed = self.make_layer(Layer_Class, label_smoothing=0.1)
 
             y_pred = self.xp.array([
                 [0.55, 0.35, 0.10],
@@ -211,10 +211,10 @@ def make_suite(backend_name, Layer_Class):
             ], dtype=self.xp.float32)
             y_true = self.xp.array([0, 2])
 
-            self.loss.backward(y_pred, y_true)
+            self.layer.backward(y_pred, y_true)
 
-            self.assertFalse(self.xp.isnan(self.loss.dinputs).any())
-            self.assertFalse(self.xp.isinf(self.loss.dinputs).any())
+            self.assertFalse(self.xp.isnan(self.layer.dinputs).any())
+            self.assertFalse(self.xp.isinf(self.layer.dinputs).any())
 
         def test_backward_does_not_mutate_dvalues(self):
             """Backward pass should not alter the incoming predictions tensor in-place."""
@@ -225,7 +225,7 @@ def make_suite(backend_name, Layer_Class):
             y_true = self.xp.array([0, 2])
             original = y_pred.copy()
 
-            self.loss.backward(y_pred, y_true)
+            self.layer.backward(y_pred, y_true)
 
             self.xp.testing.assert_array_equal(
                 original, y_pred,
@@ -243,25 +243,25 @@ def make_suite(backend_name, Layer_Class):
             ], dtype=self.xp.float32)
             y_true = self.xp.array([0, 1])
 
-            self.loss.new_pass()
-            calculated = self.loss.calculate(y_pred, y_true)
-            expected = self.xp.mean(self.loss.forward(y_pred, y_true, training=True))
+            self.layer.new_pass()
+            calculated = self.layer.calculate(y_pred, y_true)
+            expected = self.xp.mean(self.layer.forward(y_pred, y_true, training=True))
 
             self.assertAlmostEqual(float(calculated), float(expected), places=5)
 
         def test_calculate_accumulates_across_batches(self):
             """calculate_accumulated should reflect the running mean across multiple calculate() calls."""
-            self.loss.new_pass()
+            self.layer.new_pass()
 
             y_pred_1 = self.xp.array([[0.8, 0.1, 0.1]], dtype=self.xp.float32)
             y_true_1 = self.xp.array([0])
             y_pred_2 = self.xp.array([[0.2, 0.2, 0.6]], dtype=self.xp.float32)
             y_true_2 = self.xp.array([2])
 
-            loss_1 = self.loss.calculate(y_pred_1, y_true_1)
-            loss_2 = self.loss.calculate(y_pred_2, y_true_2)
+            loss_1 = self.layer.calculate(y_pred_1, y_true_1)
+            loss_2 = self.layer.calculate(y_pred_2, y_true_2)
 
-            accumulated = self.loss.calculate_accumulated()
+            accumulated = self.layer.calculate_accumulated()
             expected = (loss_1 + loss_2) / 2
 
             self.assertAlmostEqual(float(accumulated), float(expected), places=5)
@@ -270,13 +270,13 @@ def make_suite(backend_name, Layer_Class):
             y_pred = self.xp.array([[0.8, 0.1, 0.1]], dtype=self.xp.float32)
             y_true = self.xp.array([0])
 
-            self.loss.new_pass()
-            self.loss.calculate(y_pred, y_true)
+            self.layer.new_pass()
+            self.layer.calculate(y_pred, y_true)
 
-            self.loss.new_pass()
+            self.layer.new_pass()
 
-            self.assertEqual(self.loss.accumulated_sum, 0)
-            self.assertEqual(self.loss.accumulated_count, 0)
+            self.assertEqual(self.layer.accumulated_sum, 0)
+            self.assertEqual(self.layer.accumulated_count, 0)
 
     TestLossCCE.__name__ = class_name
     TestLossCCE.__qualname__ = class_name

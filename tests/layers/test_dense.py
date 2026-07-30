@@ -21,7 +21,8 @@ def make_suite(backend_name, Layer_Class):
     class_name = f"Test_{Layer_Class.__name__}_{backend_name.upper()}"
     class TestDenseLayer(unittest.TestCase): 
         def setUp(self):
-            set_backend(backend_name=backend_name)
+            self.backend_name = backend_name
+            set_backend(backend_name=self.backend_name)
             self.xp = config.xp
 
             self.xp.random.seed(42)

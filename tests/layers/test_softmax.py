@@ -17,36 +17,21 @@ def make_suite(backend_name, Layer_Class):
     class TestSoftMax(AetherBaseTestCase):
         def setUp(self):
 
-            config.set_backend(backend_name=backend_name)
+            self.backend_name = backend_name
+            config.set_backend(backend_name=self.backend_name)
             self.xp = config.xp
 
-            self.layer = Layer_Class()
-
-            if hasattr(self.layer, 'to'):
-                self.layer.to(device=backend_name)
-            elif hasattr(self.layer, '_compile_for_device'):
-                self.layer._compile_for_device(backend_name) 
-    
-        def test_backend_pointer_swap(self):
-            """Verify the layer successfully routes to the correct backend execution hooks."""
-            # Ensure global config module matches the expected test string context
-            if "CUPY" in self.__class__.__name__:
-                self.assertEqual(self.xp.__name__, "cupy")
-            else:
-                self.assertEqual(self.xp.__name__, "numpy")
+            self.layer = self.make_layer(Layer_Class)
 
         def test_forward_probabilities(self):
             """Verify SoftMax bounds values between 0 and 1, and rows sum to 1.0."""
-            # Generate arbitrary unnormalized logits
             raw_inputs = self.xp.array([
                 [1.0, 2.0, 3.0, 4.0],
                 [-10.0, 0.0, 10.0, 5.0]
             ], dtype=self.xp.float32)
             
-            # Execute forward pass
             output = self.layer.forward(raw_inputs, training=True)
             
-            # Assert row summation rules polymorphically via active namespace
             row_sums = self.xp.sum(output, axis=1)
             expected_sums = self.xp.ones(row_sums.shape, dtype=self.xp.float32)
             
@@ -55,7 +40,6 @@ def make_suite(backend_name, Layer_Class):
 
         def test_numerical_stability(self):
             """Verify that extreme logit input scales do not explode or result in NaNs."""
-            # Mix huge values with tiny ones (triggers overflow if not stabilized)
             extreme_inputs = self.xp.array([
                 [1000.0, 1000.0, 1000.0],
                 [-1000.0, -1000.0, 0.0]
@@ -66,46 +50,68 @@ def make_suite(backend_name, Layer_Class):
             self.assertFalse(self.xp.isnan(output).any(), "SoftMax suffered an unmitigated NaN explosion!")
             self.assertFalse(self.xp.isinf(output).any(), "SoftMax suffered an overflow infinity leak!")
 
+        def test_forward_does_not_mutate_inputs(self):
+            """Ensure forward pass does not modify incoming inputs in-place."""
+            inputs = self.xp.array([[1.0, 2.0, 3.0]], dtype=self.xp.float32)
+            original_inputs = inputs.copy()
+
+            self.layer.forward(inputs, training=True)
+
+            self.xp.testing.assert_array_equal(inputs, original_inputs)
+
+        def test_backward_does_not_mutate_dvalues(self):
+            """Ensure backward pass does not modify incoming upstream gradients in-place."""
+            inputs = self.xp.array([[1.0, 2.0, 3.0]], dtype=self.xp.float32)
+            self.layer.forward(inputs, training=True)
+
+            dvalues = self.xp.array([[0.1, -0.2, 0.1]], dtype=self.xp.float32)
+            original_dvalues = dvalues.copy()
+
+            self.layer.backward(dvalues)
+
+            self.xp.testing.assert_array_equal(dvalues, original_dvalues)
+            
+        def test_single_sample_batch_size_one(self):
+            """Ensure layer handles single-instance mini-batches correctly."""
+            inputs = self.xp.array([[0.5, 1.5, -0.5]], dtype=self.xp.float32)
+            output = self.layer.forward(inputs, training=False)
+
+            self.assertEqual(output.shape, (1, 3))
+            self.assertAlmostEqual(float(self.xp.sum(output)), 1.0, places=5)
+
         def test_analytical_gradients_limit_definition(self):
             """Validate isolated SoftMax backpropagation against centered finite differences."""
-            # Setup baseline data layout
+
             inputs = self.xp.array([[1.5, 2.5, 0.5], [0.1, -1.2, 3.3]], dtype=self.xp.float32)
             upstream_dvalues = self.xp.array([[0.5, -0.2, 0.1], [1.0, 0.0, -0.5]], dtype=self.xp.float32)
             
-            # 1. Run Analytical Pass (Your framework's high-speed vectorized code)
             self.layer.forward(inputs, training=True)
             self.layer.backward(upstream_dvalues)
             analytical_dinputs = self.layer.dinputs
             
-            # 2. Compute Numerical Approximation via Center Difference Limit Method
             epsilon = 1e-4
             numerical_dinputs = self.xp.zeros_like(inputs)
             
-            # Define a helper to evaluate the "Loss Function" value: Upstream Gradient Dot Output
+            
             def evaluate_loss(x_canvas):
-                # We instantiate a clean evaluation pass to isolate internal cache states
                 test_layer = self.layer.__class__()
                 if hasattr(test_layer, 'to'):
                     test_layer.to("cupy" if "CUPY" in self.__class__.__name__ else "numpy")
                 out_probs = test_layer.forward(x_canvas, training=False)
                 return self.xp.sum(out_probs * upstream_dvalues)
 
-            # Sequentially perturb each coordinate element to simulate the limit approach
             B, C = inputs.shape
             for b in range(B):
                 for c in range(C):
-                    # Create isolated canvases for positive and negative epsilon shifts
                     perturbed_plus = inputs.copy()
                     perturbed_minus = inputs.copy()
                     
                     perturbed_plus[b, c] += epsilon
                     perturbed_minus[b, c] -= epsilon
                     
-                    # Evaluate scalar loss differences
                     loss_plus = evaluate_loss(perturbed_plus)
                     loss_minus = evaluate_loss(perturbed_minus)
                     
-                    # Center difference approximation rule
                     numerical_dinputs[b, c] = (loss_plus - loss_minus) / (2.0 * epsilon)
                     
 
@@ -120,10 +126,8 @@ def make_suite(backend_name, Layer_Class):
     TestSoftMax.__qualname__ = class_name
     return TestSoftMax
 
-# Global Unpacking Loop
 for backend in backends_to_test:
     
     class_name = f"Test_{TARGET_LAYER.__name__}_{backend.upper()}"
 
-    # Bind generated class to the global namespace for unittest discovery
     globals()[class_name] = make_suite(backend_name=backend, Layer_Class=TARGET_LAYER)

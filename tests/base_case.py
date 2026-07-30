@@ -32,3 +32,22 @@ class AetherBaseTestCase(unittest.TestCase):
             cp.get_default_memory_pool().free_all_blocks()
             cp.get_default_pinned_memory_pool().free_all_blocks()
         set_backend(backend_name='numpy')
+
+    def test_backend_pointer_swap(self):
+        """Verify the layer/test environment successfully routes to the correct backend execution hooks."""
+        super().setUp()
+        if not hasattr(self, 'xp'):
+            import numpy as np
+            self.xp = np
+        if "CUPY" in self.__class__.__name__.upper():
+            self.assertEqual(
+                self.xp.__name__, 
+                "cupy", 
+                "Test class marked as CUPY, but self.xp is not Cupy!"
+            )
+        else:
+            self.assertEqual(
+                self.xp.__name__, 
+                "numpy", 
+                "Test class marked for CPU/NumPy, but self.xp is not Numpy!"
+            )

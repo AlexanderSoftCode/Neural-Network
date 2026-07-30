@@ -17,27 +17,18 @@ def make_suite(backend_name, Layer_Class):
         DEFAULT_RATE = 0.5
         FIXED_SEED = 12345
         def setUp(self):
-            
-            config.set_backend(backend_name=backend_name)
-            self.xp = config.xp 
             self.backend_name = backend_name
-            self.layer = Layer_Class(rate=self.DEFAULT_RATE, seed=self.FIXED_SEED)
-            
-            # If a backend requires seperate functions, mimic Model.to
-            if hasattr(self.layer, '_compile_for_device'):
-                self.layer._compile_for_device(backend_name)
-                
+            config.set_backend(backend_name=self.backend_name)
+            self.xp = config.xp 
+
+            self.layer = self.make_layer(
+                Layer_Class, rate=self.DEFAULT_RATE, seed=self.FIXED_SEED
+                )
             self.uses_gpu_kernel = (self.layer.forward.__name__ == '_forward_gpu')
-        def _make_layer(self, rate, seed=None):
-            layer = Layer_Class(rate=rate, seed=self.FIXED_SEED if seed is None else seed)
-            if hasattr(layer, '_compile_for_device'):
-                layer._compile_for_device(self.backend_name)
-            return layer
-        
- 
+         
         def test_keep_rate_computed_from_rate(self):
             rate = 0.35
-            layer = self._make_layer(rate=rate)
+            layer = self.make_layer(Layer_Class, rate=rate)
             self.assertAlmostEqual(layer.keep_rate, 1 - rate, places=7)
   
         def test_forward_output_shape_matches_input_1d(self):
@@ -63,7 +54,7 @@ def make_suite(backend_name, Layer_Class):
             self.assertFalse(bool(inputs[0, 0] == 999))
   
         def test_forward_training_zero_rate_is_identity(self):
-            layer = self._make_layer(rate=0.0)
+            layer = self.make_layer(Layer_Class, rate=0.0)
             inputs = self.xp.linspace(0.1, 5.0, 500, dtype=self.xp.float32)
             output = layer.forward(inputs, training=True)
             self.assertTrue(bool(self.xp.allclose(output, inputs, rtol=1e-5)))
@@ -71,7 +62,7 @@ def make_suite(backend_name, Layer_Class):
         def test_forward_scales_kept_units_by_inverse_keep_rate(self):
             rate = 0.3
             keep_rate = 1 - rate
-            layer = self._make_layer(rate=rate)
+            layer = self.make_layer(Layer_Class, rate=rate)
             n = 20000
             inputs = self.xp.ones(n, dtype=self.xp.float32)
  
@@ -85,7 +76,7 @@ def make_suite(backend_name, Layer_Class):
  
         def test_forward_drops_approximately_expected_fraction(self):
             rate = 0.4
-            layer = self._make_layer(rate=rate)
+            layer = self.make_layer(Layer_Class, rate=rate)
             n = 200000
             inputs = self.xp.ones(n, dtype=self.xp.float32)
  
@@ -103,7 +94,7 @@ def make_suite(backend_name, Layer_Class):
             # the same positions only if forward/backward share one mask
             # (i.e. backward correctly reuses the offset/mask from the
             # preceding forward call rather than drawing a fresh one).
-            layer = self._make_layer(rate=0.5)
+            layer = self.make_layer(Layer_Class, rate=0.5)
             n = 5000
             inputs = self.xp.ones(n, dtype=self.xp.float32)
  
@@ -126,7 +117,7 @@ def make_suite(backend_name, Layer_Class):
             if not self.uses_gpu_kernel:
                 self.skipTest('_call_counter/offset bookkeeping only applies to the philox GPU path')
  
-            layer = self._make_layer(rate=0.5)
+            layer = self.make_layer(Layer_Class, rate=0.5)
             inputs = self.xp.ones(100, dtype=self.xp.float32)
  
             self.assertEqual(layer._call_counter, 0)
@@ -141,7 +132,7 @@ def make_suite(backend_name, Layer_Class):
             if not self.uses_gpu_kernel:
                 self.skipTest('_call_counter bookkeeping only applies to the philox GPU path')
  
-            layer = self._make_layer(rate=0.5)
+            layer = self.make_layer(Layer_Class, rate=0.5)
             inputs = self.xp.ones(100, dtype=self.xp.float32)
             layer.forward(inputs, training=False)
             self.assertEqual(layer._call_counter, 0)

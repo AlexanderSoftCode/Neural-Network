@@ -37,28 +37,22 @@ def make_suite(backend_name, Layer_Class):
         NUM_FILTERS = 4
         FILTER_SIZE = (3, 3)
         STRIDES = (1, 1)
-        PADDING = 'same'
 
         def setUp(self):
+            self.backend_name = backend_name
             # Function from aether.config.py 
-            config.set_backend(backend_name=backend_name)
+            config.set_backend(backend_name=self.backend_name)
             self.xp = config.xp
 
             # Grab extra utility imports for specific backend if needed
             self.as_strided = config.get_stride_utility(self.xp)
-            self.layer = Layer_Class(
-                input_shape=self.INPUT_SHAPE, 
-                num_filters=self.NUM_FILTERS,
-                filter_size=self.FILTER_SIZE, 
-                strides=self.STRIDES, 
-                padding=self.PADDING
-                )
-            self.test_images = self.xp.random.randn(2, 28, 28, 1)
 
-            # If a backend requires seperate functions, mimic Model.to
-            # otherwise do nothing
-            if hasattr(self.layer, '_compile_for_device'):
-                self.layer._compile_for_device(backend_name)
+            # Add the layer class, then add its respective arguments after
+            self.layer = self.make_layer(
+                Layer_Class, filter_size=self.FILTER_SIZE,
+                stride=self.STRIDE, padding=self.PADDING,
+            )
+            self.test_images = self.xp.random.randn(2, 28, 28, 1)
         
         def test_conv_forward_shape(self):
             """Verify output dimensions based on padding and stride"""

@@ -16,17 +16,14 @@ def make_suite(backend_name, Layer_Class):
 
     class_name = f"Test_{TARGET_LAYER.__name__}_{backend_name.upper()}"
     class TestLeakyReLU(AetherBaseTestCase):
+        ALPHA = 0.1
         def setUp(self):
-            # Function from aether.config.py 
-            config.set_backend(backend_name=backend_name)
+            self.backend_name = backend_name
+            config.set_backend(backend_name=self.backend_name)
             self.xp = config.xp
 
-            self.layer = Layer_Class(alpha = 0.1)
-
-            # If a backend requires seperate functions, mimic Model.to
-            if hasattr(self.layer, '_compile_for_device'):
-                self.layer._compile_for_device(backend_name)
-        
+            self.layer = self.make_layer(Layer_Class, alpha=self.ALPHA)
+                    
         def test_forward_pass(self):
             """Verify output values for leaky_ReLU"""            
             # Setup input with negative, zero, and positive values
@@ -130,18 +127,13 @@ def make_suite(backend_name, Layer_Class):
             self.xp.testing.assert_array_equal(
                 desired_dvalues,
                 dvalues,
-                err_msg="Framework VRAM leakage/corruption: dvalues is " \
-                " being mutated in-place during the backward pass."
+                err_msg="dvalues is being mutated in-place during the backward pass."
             )
     
         def test_custom_alpha_scaling(self):
             """Verify hyperparameter integrity"""
             custom_alpha = 0.25
-            custom_layer = LeakyReLU(alpha = 0.25)
-
-            if hasattr(custom_layer, '_compile_for_device'):
-                custom_layer._compile_for_device(backend_name)
-        
+            custom_layer = self.make_layer(Layer_Class, alpha=custom_alpha)
             inputs = self.xp.array([[-2.0, -4.0]], dtype=self.xp.float32)
             expected_output = self.xp.array([[-0.5, -1.0]], dtype=self.xp.float32)
 
