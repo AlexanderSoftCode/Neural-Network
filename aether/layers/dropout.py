@@ -1,7 +1,7 @@
 import numpy as np
 import aether.config as config
 from aether.base import Layer
-from aether.custom_kernels import dropout as gpu_dropout
+from aether.custom_kernels import dropout_kernel as gpu_dropout
 
 class Dropout(Layer): 
     _stream_counter = 0

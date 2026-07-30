@@ -126,6 +126,14 @@ _MAX_BACKWARD_NONOVERLAP_OP = {
     "reduce_body": "if (in_idx == src_idx) { dinputs[in_idx] = dval; }",
 }
 
+_AVG_OP = {
+    "name": "avg",
+    "aux_out_decl": "",
+    "reduce_init": "float sum_val = 0.0f;",
+    "reduce_body": "sum_val += x[in_idx];",
+    "writeback": "out[out_idx] = sum_val / (float)(fH * fW);",
+}
+
 # Every slot in the window receives an equal share of the upstream
 # gradient. No aux input needed (no argmax bookkeeping for avg-pool).
 # Included now for when AvgPool2d lands; not wired up to a public
@@ -256,3 +264,22 @@ def get_max_pool2d_backward_kernel(variant: str):
     that requires the atomic/scatter-add fallback path instead.
     """
     return _get_compiled_backward_kernel(_MAX_BACKWARD_NONOVERLAP_OP, variant)
+
+# Helper Functions for AvgPool2d
+def is_gpu_avg_pool2d_available():
+    """Checks if CuPy hardware support and kernels are loaded."""
+    return config.HAS_CUPY
+
+def get_avg_pool2d_forward_kernel(variant: str):
+    """Returns a compiled RawKernel for the given variant ('cuda' or 'hip').
+    Memoized via _pool_kernel_cache — no lazy self-rewriting needed.
+    """
+    return _get_compiled_forward_kernel(_AVG_OP, variant)
+
+def get_avg_pool2d_backward_kernel(variant: str):
+    """Returns a compiled RawKernel implementing the AvgPool2d backward
+    scatter for the non-overlapping-window case (filter_size == stride
+    only). Do NOT use this for overlapping windows —
+    that requires the atomic/scatter-add fallback path instead.
+    """
+    return _get_compiled_backward_kernel(_AVG_BACKWARD_NONOVERLAP_OP, variant)
