@@ -164,6 +164,72 @@ def make_suite(backend_name, Layer_Class):
             expected[0, 1, 1, 0] = 4.0
             self.xp.testing.assert_array_almost_equal(dinputs, expected, decimal=5)
 
+# ---- Asymmetric Geometry & Spatial Edge Cases
+
+        def test_forward_asymmetric_filter_and_stride(self):
+            """Verify output dimensions and correctness when height and width 
+            filters/strides are asymmetric."""
+            layer = self.make_layer(
+                Layer_Class, filter_size=(3, 2), stride=(2, 1), padding='valid'
+            )
+            inputs = self.xp.arange(1, 36, dtype=self.xp.float32).reshape(1, 7, 5, 1)
+            output = layer.forward(inputs, training=True)
+            self.assertEqual(output.shape, (1, 3, 4, 1))
+
+        # ---- Backend Parity Regression
+
+        def test_numpy_cupy_parity(self):
+            """Verify that CPU (NumPy) and GPU (CuPy) backends produce identical
+            numerical results for identical inputs."""
+            if self.backend_name != 'cupy':
+                self.skipTest("Parity test only executes on GPU (CuPy) backend compared against NumPy.")
+
+            np_rng = np.random.RandomState(42)
+            raw_input = np_rng.randn(2, 6, 6, 2).astype(np.float32)
+
+            config.set_backend('numpy')
+            cpu_layer = Layer_Class(filter_size=(2, 2), stride=(2, 2), padding='valid')
+            cpu_out = cpu_layer.forward(raw_input, training=True)
+
+            config.set_backend('cupy')
+            gpu_layer = self.make_layer(Layer_Class, filter_size=(2, 2), stride=(2, 2), padding='valid')
+            gpu_out = gpu_layer.forward(self.xp.array(raw_input), training=True)
+
+            self.xp.testing.assert_array_almost_equal(gpu_out, self.xp.array(cpu_out), decimal=5)
+
+        # ---- Data Type Preservation
+
+        def test_forward_backward_dtype_preservation(self):
+            """Verify that forward and backward operations preserve input data precision."""
+            inputs = self.xp.ones((1, 4, 4, 1), dtype=self.xp.float32)
+            output = self.layer.forward(inputs, training=True)
+            self.assertEqual(output.dtype, self.xp.float32)
+
+            dvalues = self.xp.ones_like(output, dtype=self.xp.float32)
+            dinputs = self.layer.backward(dvalues)
+            self.assertEqual(dinputs.dtype, self.xp.float32)
+
+        # ---- Boundary & Negative Value Mechanics
+
+        def test_forward_zero_and_negative_inputs(self):
+            """Verify max pooling correctly extracts maximum values from signed inputs."""
+            inputs = self.xp.array([[[[-4.0], [-2.0]], 
+                                     [[ 0.0], [ 2.0]]]], dtype=self.xp.float32)
+            expected = self.xp.array([[[[2.0]]]], dtype=self.xp.float32)
+            
+            output = self.layer.forward(inputs, training=True)
+            self.xp.testing.assert_array_almost_equal(output, expected, decimal=5)
+
+        def test_same_padding_boundary_scaling(self):
+            """Verify boundary max pooling behavior under 'same' padding on non-divisible inputs."""
+            layer = self.make_layer(
+                Layer_Class, filter_size=(2, 2), stride=(2, 2), padding='same'
+            )
+            inputs = self.xp.ones((1, 3, 3, 1), dtype=self.xp.float32)
+            output = layer.forward(inputs, training=True)
+            
+            self.assertAlmostEqual(float(output[0, 1, 1, 0]), 1.0, places=5)
+
         # ---- Validation/Error Handling ----------------------
 
         def test_forward_invalid_padding_raises_value_error(self):
@@ -185,7 +251,7 @@ def make_suite(backend_name, Layer_Class):
             layer = self.make_layer(Layer_Class, filter_size=(2, 2), stride=(2, 2),
                                     padding='valid')
 
-            fixed_input = self.xp.random.randn(2, 4, 4, 1)
+            fixed_input = self.xp.random.randn(2, 4, 4, 1).astype(dtype=self.xp.float32)
             output = layer.forward(fixed_input, training=True)
             dvalues = self.xp.ones_like(output)  # ones so sum(output) is the scalar loss
 
