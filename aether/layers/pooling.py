@@ -349,7 +349,6 @@ class AvgPool2d(_PoolNd):
         return self.output
 
     def _backward_fallback(self, dvalues): 
-            # Updated: Resolved missing variable/module bindings and implemented 6D as_strided view
             xp = config.get_array_module(dvalues)
             as_strided = config.get_stride_utility(xp)
 
@@ -366,7 +365,6 @@ class AvgPool2d(_PoolNd):
             dvalues_dilated = xp.zeros((S, dilated_H, dilated_W, C), dtype=dvalues.dtype)                
             dvalues_dilated[:, ::sH, ::sW, :] = dvalues
             
-            # Calculate padding boundaries required for transposed full convolution
             backward_pad_top = fH - 1
             backward_pad_left = fW - 1
             backward_pad_bottom = H_pad - dilated_H
@@ -383,8 +381,6 @@ class AvgPool2d(_PoolNd):
                 mode='constant',
                 constant_values=0.0,
             )
-
-            # Extract 6D patch view over padded gradients
             dvalues_patches = as_strided(
                 dvalues_padded,
                 shape=(S, H_pad, W_pad, fH, fW, C),

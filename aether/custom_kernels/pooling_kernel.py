@@ -44,12 +44,37 @@ void $kernel_name(
 }
 ''')
 
-_POOL_BACKWARD_NONOVERLAP_TEMPLATE = Template(r'''
+_MAX_BACKWARD_DIRECT_TEMPLATE = Template(r'''
 $hip_include
 extern "C" __global__
 void $kernel_name(
     const float* __restrict__ dvalues,
-    $aux_in_decl
+    const int* __restrict__ max_indices,
+    float* __restrict__ dinputs,
+    const int S, const int H_pad, const int W_pad, const int C,
+    const int fH, const int fW, const int sH, const int sW,
+    const int H_out, const int W_out
+) {
+    int c = blockIdx.x * blockDim.x + threadIdx.x;
+    int w_out = blockIdx.y * blockDim.y + threadIdx.y;
+    int h_s = blockIdx.z * blockDim.z + threadIdx.z;
+
+    int h_out = h_s % H_out;
+    int s = h_s / H_out;
+
+    if (c >= C || w_out >= W_out || s >= S) return;
+
+    int out_idx = ((s * H_out + h_out) * W_out + w_out) * C + c;
+    int src_idx = max_indices[out_idx];
+    dinputs[src_idx] = dvalues[out_idx];
+}
+''')
+
+_AVG_BACKWARD_NONOVERLAP_TEMPLATE = Template(r'''
+$hip_include
+extern "C" __global__
+void $kernel_name(
+    const float* __restrict__ dvalues,
     float* __restrict__ dinputs,
     const int S, const int H_pad, const int W_pad, const int C,
     const int fH, const int fW, const int sH, const int sW,
@@ -69,9 +94,7 @@ void $kernel_name(
     int batch_offset = s * H_pad * W_pad * C;
 
     int out_idx = ((s * H_out + h_out) * W_out + w_out) * C + c;
-    float dval = dvalues[out_idx];
-
-    $reduce_init
+    float avg_val = dvalues[out_idx] / (float)(fH * fW);
 
     for (int fh = 0; fh < fH; ++fh) {
         int h_in = h_start + fh;
@@ -80,8 +103,7 @@ void $kernel_name(
         for (int fw = 0; fw < fW; ++fw) {
             int w_in = w_start + fw;
             int in_idx = row_offset + w_in * C + c;
-
-            $reduce_body
+            dinputs[in_idx] = avg_val;
         }
     }
 }
@@ -115,17 +137,6 @@ _MAX_OP_INFERENCE = {
     "writeback": "out[out_idx] = max_val;",
 }
 
-# Only the argmax slot (recorded during forward) receives the upstream
-# gradient; every other slot in the window gets nothing. Since windows
-# don't overlap, that argmax slot is never revisited by another thread,
-# so a direct conditional write is race-free.
-_MAX_BACKWARD_NONOVERLAP_OP = {
-    "name": "max_backward_nonoverlap",
-    "aux_in_decl": "const int* __restrict__ max_indices,",
-    "reduce_init": "int src_idx = max_indices[out_idx];",
-    "reduce_body": "if (in_idx == src_idx) { dinputs[in_idx] = dval; }",
-}
-
 _AVG_OP = {
     "name": "avg",
     "aux_out_decl": "",
@@ -134,16 +145,6 @@ _AVG_OP = {
     "writeback": "out[out_idx] = sum_val / (float)(fH * fW);",
 }
 
-# Every slot in the window receives an equal share of the upstream
-# gradient. No aux input needed (no argmax bookkeeping for avg-pool).
-# Included now for when AvgPool2d lands; not wired up to a public
-# getter yet since AvgPool2d itself doesn't exist.
-_AVG_BACKWARD_NONOVERLAP_OP = {
-    "name": "avg_backward_nonoverlap",
-    "aux_in_decl": "",
-    "reduce_init": "float avg_val = dval / (fH * fW);",
-    "reduce_body": "dinputs[in_idx] = avg_val;",
-}
 
 _pool_kernel_cache = {}
 
@@ -194,49 +195,53 @@ def _get_compiled_forward_kernel(op_dict: dict, variant: str):
     _pool_kernel_cache[cache_key] = kernel
     return kernel
 
-def _get_compiled_backward_kernel(op_dict: dict, variant: str):
-    """Retrieves or compiles a GPU pooling backward RawKernel for the
-    non-overlapping-window (filter_size == stride) case. Mirrors
-    `_get_compiled_kernel`'s memoized JIT-compile pattern, but substitutes
-    into `_POOL_BACKWARD_NONOVERLAP_TEMPLATE`, which is agnostic to the
-    specific pooling op — max-pool and avg-pool (and anything else that
-    is a per-window reduction) plug in via `aux_in_decl` / `reduce_init` /
-    `reduce_body` the same way forward ops plug into `_POOL_FORWARD_TEMPLATE`.
+def _get_compiled_max_backward_kernel(variant: str):
+    """Compiles/retrieves the MaxPool2d non-overlapping backward RawKernel.
 
-    Args:
-        op_dict (dict): Descriptor containing operation-specific C++ code fragments.
-            Expected keys:
-                - "name" (str): Operation identifier (e.g., 'max_backward_nonoverlap').
-                - "aux_in_decl" (str): C++ declaration for extra input buffers
-                  needed by backward (e.g. max_indices for max-pool; empty for avg-pool).
-                - "reduce_init" (str): C++ setup code prior to the window loop
-                  (e.g. loading the argmax source index, or precomputing the
-                  averaged gradient value).
-                - "reduce_body" (str): C++ logic executed for each window element,
-                  responsible for writing into `dinputs` directly.
-        variant (str): Target GPU platform architecture. Must be either 'cuda' or 'hip'.
-
-    Returns:
-        RawKernel: A compiled CuPy RawKernel instance ready to be launched
-        with grid and block dimensions.
+    Unlike forward compilation, this does not go through op-dict substitution —
+    _MAX_BACKWARD_DIRECT_TEMPLATE is a fully specialized kernel (direct
+    argmax-indexed write, no per-window loop needed since max_indices already
+    holds the flat source index from the forward pass). Only $hip_include and
+    $kernel_name are templated.
     """
-
-    cache_key = (op_dict["name"], variant)
+    cache_key = ("max_backward_nonoverlap", variant)
     if cache_key in _pool_kernel_cache:
         return _pool_kernel_cache[cache_key]
 
-    kernel_name = f"pool2d_backward_{op_dict['name']}_{variant}_kernel"
-    source = _POOL_BACKWARD_NONOVERLAP_TEMPLATE.substitute(
+    kernel_name = f"pool2d_backward_max_nonoverlap_{variant}_kernel"
+    source = _MAX_BACKWARD_DIRECT_TEMPLATE.substitute(
         hip_include="#include <hip/hip_runtime.h>\n" if variant == "hip" else "",
         kernel_name=kernel_name,
-        aux_in_decl=op_dict["aux_in_decl"],
-        reduce_init=op_dict["reduce_init"],
-        reduce_body=op_dict["reduce_body"],
     )
 
     kernel = config.build_kernel(
         lambda: config.cp.RawKernel(source, kernel_name),
-        name=f"pool2d_backward_{op_dict['name']}_{variant}",
+        name=f"pool2d_backward_max_nonoverlap_{variant}",
+    )
+    _pool_kernel_cache[cache_key] = kernel
+    return kernel
+
+
+def _get_compiled_avg_backward_kernel(variant: str):
+    """Compiles/retrieves the AvgPool2d non-overlapping backward RawKernel.
+
+    Same story as the max variant: _AVG_BACKWARD_NONOVERLAP_TEMPLATE is fully
+    specialized (uniform fH*fW scatter, no argmax bookkeeping), only
+    $hip_include and $kernel_name are templated.
+    """
+    cache_key = ("avg_backward_nonoverlap", variant)
+    if cache_key in _pool_kernel_cache:
+        return _pool_kernel_cache[cache_key]
+
+    kernel_name = f"pool2d_backward_avg_nonoverlap_{variant}_kernel"
+    source = _AVG_BACKWARD_NONOVERLAP_TEMPLATE.substitute(
+        hip_include="#include <hip/hip_runtime.h>\n" if variant == "hip" else "",
+        kernel_name=kernel_name,
+    )
+
+    kernel = config.build_kernel(
+        lambda: config.cp.RawKernel(source, kernel_name),
+        name=f"pool2d_backward_avg_nonoverlap_{variant}",
     )
     _pool_kernel_cache[cache_key] = kernel
     return kernel
@@ -263,8 +268,7 @@ def get_max_pool2d_backward_kernel(variant: str):
     instead of an atomicAdd. Do NOT use this for overlapping windows —
     that requires the atomic/scatter-add fallback path instead.
     """
-    return _get_compiled_backward_kernel(_MAX_BACKWARD_NONOVERLAP_OP, variant)
-
+    return _get_compiled_max_backward_kernel(variant)
 # Helper Functions for AvgPool2d
 def is_gpu_avg_pool2d_available():
     """Checks if CuPy hardware support and kernels are loaded."""
@@ -282,4 +286,4 @@ def get_avg_pool2d_backward_kernel(variant: str):
     only). Do NOT use this for overlapping windows —
     that requires the atomic/scatter-add fallback path instead.
     """
-    return _get_compiled_backward_kernel(_AVG_BACKWARD_NONOVERLAP_OP, variant)
+    return _get_compiled_avg_backward_kernel(variant)

@@ -270,7 +270,7 @@ class Model:
         self.device = target_device
 
         for layer in self.layers:
-            layer.to(target_device)
+            layer._compile_for_device(target_device)
 
     #Returns paramteres of trainable layers
     def get_parameters(self):
