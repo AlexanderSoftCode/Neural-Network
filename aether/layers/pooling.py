@@ -3,10 +3,22 @@ import numpy as np
 import aether.config as config
 from aether.base import Layer
 from aether.custom_kernels import pooling_kernel as gpu_pooling
+from aether.custom_kernels.launch_math import _compute_magic_numbers 
 
 class _PoolNd(Layer):
+
     def __init__(self):
         self._launch_cache = {}
+
+    @staticmethod
+    def _resolve_gpu_variant():
+        """CUDA vs HIP variant + recommended launch block depth.
+        Block depth of 2 is recommended for HIP, 4 for CUDA.
+        """
+        is_hip = config.HAS_CUPY and config.xp.cuda.runtime.is_hip
+        variant = "hip" if is_hip else "cuda"
+        block_z = 2 if is_hip else 4
+        return variant, block_z
 
     def _get_padded_input(self, H_in, W_in):
         fH, fW = self.filter_size
@@ -60,36 +72,63 @@ class _PoolNd(Layer):
 
         inputs_padded = xp.ascontiguousarray(inputs_padded)
         return xp, inputs_padded, S, H_out, W_out
-    def _get_launch_geometry(self, S, H_pad, W_pad, C, H_out, W_out, block_z):
-        """A helper function to memoize grid/block/static argument per input shape"""
+    
+    def _get_shape_meta(self, input_shape, block_z):
+            """
+            Based on deprecated _PoolNd._get_launch_geometry
+            Retrieves or computes launch geometry, padding bounds, and scalar static arguments.
+            Memoized per unique (input_shape, block_z) pair. On cache hits, executes in ~100ns.
+            """
+            cache_key = (input_shape, block_z)
+            cached = self._launch_cache.get(cache_key)
+            if cached is not None:
+                return cached
 
-        key = (S, H_pad, W_pad, C, H_out, W_out, block_z)
-        cached = self._launch_cache.get(key)
-        if cached is not None:
-            return cached
+            S, H_in, W_in, C = input_shape
+            H_out, W_out, pad_top, pad_bottom, pad_left, pad_right = self._get_padded_input(H_in, W_in)
 
-        fH, fW = self.filter_size
-        sH, sW = self.stride
+            H_pad = H_in + pad_top + pad_bottom
+            W_pad = W_in + pad_left + pad_right
 
-        block_x = min(32, C)
-        block_y = 8
-        block_dim = (block_x, block_y, block_z)
- 
-        grid_x = (C + block_x - 1) // block_x
-        grid_y = (W_out + block_y - 1) // block_y
-        grid_z = (H_out * S + block_z - 1) // block_z
-        grid_dim = (grid_x, grid_y, grid_z)
- 
-        static_args = (
-            np.int32(S), np.int32(H_pad), np.int32(W_pad), np.int32(C),
-            np.int32(fH), np.int32(fW), np.int32(sH), np.int32(sW),
-            np.int32(H_out), np.int32(W_out),
-        )
- 
-        result = (block_dim, grid_dim, static_args)
-        self._launch_cache[key] = result
-        return result
+            fH, fW = self.filter_size
+            sH, sW = self.stride
 
+            block_x = min(32, C)
+            block_y = 8
+            block_dim = (block_x, block_y, block_z)
+
+            grid_x = (C + block_x - 1) // block_x
+            grid_y = (W_out + block_y - 1) // block_y
+            grid_z = (H_out * S + block_z - 1) // block_z
+            grid_dim = (grid_x, grid_y, grid_z)
+
+            # Since GPU doesn't have dedicated GPU divsion units, perform the divsion 
+            # algorithm needed to unsplit the grid_z axis on the CPU instead. 
+            max_h_s = grid_z * block_z - 1
+            magic_scale, magic_shift = _compute_magic_numbers(H_out, max_h_s)
+
+            static_args = (
+                np.int32(S), np.int32(H_pad), np.int32(W_pad), np.int32(C),
+                np.int32(fH), np.int32(fW), np.int32(sH), np.int32(sW),
+                np.int32(H_out), np.int32(W_out),
+                magic_scale, magic_shift,
+            )
+
+            meta = {
+                "S": S, "H_in": H_in, "W_in": W_in, "C": C,
+                "H_out": H_out, "W_out": W_out,
+                "H_pad": H_pad, "W_pad": W_pad,
+                "padded_shape": (S, H_pad, W_pad, C),
+                "out_shape": (S, H_out, W_out, C),
+                "pad_top": pad_top, "pad_bottom": pad_bottom,
+                "pad_left": pad_left, "pad_right": pad_right,
+                "block_dim": block_dim,
+                "grid_dim": grid_dim,
+                "static_args": static_args,
+            }
+            self._launch_cache[cache_key] = meta
+            return meta
+    
     def _forward_gpu_common(self, inputs, pad_value, block_z, kernel, track_indices=False):
         """Shared GPU forward driver for 2D pooling layers.
         
@@ -97,59 +136,42 @@ class _PoolNd(Layer):
         geometry memoization, and kernel dispatch.
         """
         xp, inputs_padded, S, H_out, W_out = self._prepare_forward_input(inputs, pad_value=pad_value)
+        meta = self._get_shape_meta(inputs.shape, block_z)
 
         self.inputs_shape = inputs.shape
-        self.padded_shape = inputs_padded.shape
-        _, H_pad, W_pad, C = inputs_padded.shape
+        self.padded_shape = meta["padded_shape"]
 
-        self.output = xp.empty((S, H_out, W_out, C), dtype=inputs.dtype)
-        block_dim, grid_dim, static_args = self._get_launch_geometry(
-            S, H_pad, W_pad, C, H_out, W_out, block_z
-        )
+        self.output = xp.empty(meta["out_shape"], dtype=inputs_padded.dtype)
 
         if track_indices:
-            self.max_indices = xp.empty((S, H_out, W_out, C), dtype=xp.int32)
+            self.max_indices = xp.empty(meta["out_shape"], dtype=xp.int32)
             aux_args = (self.max_indices,)
         else:
             self.max_indices = None
             aux_args = ()
 
-        kernel_args = (inputs_padded, self.output) + aux_args + static_args
-        kernel(grid_dim, block_dim, kernel_args)
+        kernel_args = (inputs_padded, self.output) + aux_args + meta["static_args"]
+        kernel(meta["grid_dim"], meta["block_dim"], kernel_args)
 
         return self.output
 
     def _backward_gpu_common(self, dvalues, block_z, kernel, aux_args=()):
-        """Shared GPU backward driver for non-overlapping pooling windows.
-        
-        Handles shape extraction, input casting, dinputs allocation, geometry calculation,
-        kernel launch, and zero-padding stripping.
-        """
-        # Fallback to scatter-add path if windows overlap
-        if self.filter_size != self.stride:
-            return self._backward_fallback(dvalues)
-
+        """Shared GPU backward driver using full shape memoization."""
         xp = config.get_array_module(dvalues)
 
-        S, H_pad, W_pad, C = self.padded_shape
-        _, H_out, W_out, _ = dvalues.shape
-        _, H_in, W_in, _ = self.inputs_shape
+        meta = self._get_shape_meta(self.inputs_shape, block_z)
 
         dvalues = xp.ascontiguousarray(dvalues.astype(xp.float32, copy=False))
-        dinputs_padded = xp.zeros(self.padded_shape, dtype=dvalues.dtype)
+        dinputs_padded = xp.zeros(meta["padded_shape"], dtype=dvalues.dtype)
 
-        block_dim, grid_dim, static_args = self._get_launch_geometry(
-            S, H_pad, W_pad, C, H_out, W_out, block_z
-        )
-
-        kernel_args = (dvalues,) + aux_args + (dinputs_padded,) + static_args
-        kernel(grid_dim, block_dim, kernel_args)
+        kernel_args = (dvalues,) + aux_args + (dinputs_padded,) + meta["static_args"]
+        kernel(meta["grid_dim"], meta["block_dim"], kernel_args)
 
         self.dinputs = dinputs_padded[
             :,
-            self.pad_top : self.pad_top + H_in,
-            self.pad_left : self.pad_left + W_in,
-            :
+            meta["pad_top"] : meta["pad_top"] + meta["H_in"],
+            meta["pad_left"] : meta["pad_left"] + meta["W_in"],
+            :,
         ]
         return self.dinputs
     
@@ -168,26 +190,29 @@ class MaxPool2d(_PoolNd):
     def _compile_for_device(self, device):
         """Triggered by Model.to(device) to map low-level hardware paths."""
         if device == 'cupy' and gpu_pooling.is_gpu_max_pool2d_available():
-            is_hip = config.HAS_CUPY and config.xp.cuda.runtime.is_hip
-            self._variant = "hip" if is_hip else "cuda"
+            variant, block_z = self._resolve_gpu_variant()
 
-            # Block depth of 2 is recommended for HIP
-            # Block depth of 4 is recommended for CUDA
-            self._block_z = 2 if is_hip else 4
+            kernel_train = gpu_pooling.get_max_pool2d_forward_kernel(variant, training=True)
+            kernel_infer = gpu_pooling.get_max_pool2d_forward_kernel(variant, training=False)
+            kernel_backward = gpu_pooling.get_max_pool2d_backward_kernel(variant)
 
-            self._kernel_train = gpu_pooling.get_max_pool2d_forward_kernel(
-                self._variant, training=True
-            )
-            self._kernel_infer = gpu_pooling.get_max_pool2d_forward_kernel(
-                self._variant, training=False
-            )
+            if kernel_train is None or kernel_infer is None or kernel_backward is None:
+                self.forward = self._forward_fallback
+                self.backward = self._backward_fallback
+                return
 
-            self._kernel_backward_nonoverlap = gpu_pooling.get_max_pool2d_backward_kernel(
-                self._variant
-            )
+            self._variant = variant
+            self._block_z = block_z
+            self._kernel_train = kernel_train
+            self._kernel_infer = kernel_infer
+            self._kernel_backward_nonoverlap = kernel_backward
 
-            self.forward = partial(self._forward_gpu, block_z=self._block_z)
-            self.backward = partial(self._backward_gpu, block_z=self._block_z)
+            self.forward = partial(self._forward_gpu, block_z=block_z)
+    
+            if self.filter_size == self.stride:
+                self.backward = partial(self._backward_gpu, block_z=block_z)
+            else:
+                self.backward = self._backward_fallback
         else:
             self.forward = self._forward_fallback
             self.backward = self._backward_fallback
@@ -284,20 +309,27 @@ class AvgPool2d(_PoolNd):
     def _compile_for_device(self, device):
         """Triggered by Model.to(device) to map low-level hardware paths."""
         if device == 'cupy' and gpu_pooling.is_gpu_avg_pool2d_available():
-            is_hip = config.HAS_CUPY and config.xp.cuda.runtime.is_hip
-            self._variant = "hip" if is_hip else "cuda"
+            variant, block_z = self._resolve_gpu_variant()
 
-            # Block depth of 2 is recommended for HIP
-            # Block depth of 4 is recommended for CUDA
-            self._block_z = 2 if is_hip else 4
-            self._kernel_forward = gpu_pooling.get_avg_pool2d_forward_kernel(
-                self._variant
-            )
-            self._kernel_backward_nonoverlap = gpu_pooling.get_avg_pool2d_backward_kernel(
-                self._variant
-            )
-            self.forward = partial(self._forward_gpu, block_z=self._block_z)
-            self.backward = partial(self._backward_gpu, block_z=self._block_z)
+            kernel_forward = gpu_pooling.get_avg_pool2d_forward_kernel(variant)
+            kernel_backward = gpu_pooling.get_avg_pool2d_backward_kernel(variant)
+
+            if kernel_forward is None or kernel_backward is None:
+                self.forward = self._forward_fallback
+                self.backward = self._backward_fallback
+                return
+
+            self._variant = variant
+            self._block_z = block_z
+            self._kernel_forward = kernel_forward
+            self._kernel_backward_nonoverlap = kernel_backward
+
+            self.forward = partial(self._forward_gpu, block_z=block_z)
+
+            if self.filter_size == self.stride:
+                self.backward = partial(self._backward_gpu, block_z=block_z)
+            else:
+                self.backward = self._backward_fallback
         else:
             self.forward = self._forward_fallback
             self.backward = self._backward_fallback

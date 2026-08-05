@@ -8,28 +8,31 @@ void $kernel_name(
     const float* __restrict__ x,
     float* __restrict__ out,
     $aux_out_decl
-    const int S, const int H_in, const int W_in, const int C,
+    const int S, const int H_pad, const int W_pad, const int C,
     const int fH, const int fW, const int sH, const int sW,
-    const int H_out, const int W_out
+    const int H_out, const int W_out,
+    const unsigned int magic_scale, const int magic_shift  
 ) {
     int c = blockIdx.x * blockDim.x + threadIdx.x;
     int w_out = blockIdx.y * blockDim.y + threadIdx.y;
+    if (c >= C || w_out >= W_out) return;
+
     int h_s = blockIdx.z * blockDim.z + threadIdx.z;
+    unsigned long long prod = (unsigned long long)h_s * magic_scale;
+    int s = (int)(prod >> (32 + magic_shift));
+    if (s >= S) return;
 
-    int h_out = h_s % H_out;
-    int s = h_s / H_out;
-
-    if (c >= C || w_out >= W_out || s >= S) return;
+    int h_out = h_s - (s * H_out);
 
     int h_start = h_out * sH;
     int w_start = w_out * sW;
-    int batch_offset = s * H_in * W_in * C;
+    int batch_offset = s * H_pad * W_pad * C;
 
     $reduce_init
 
     for (int fh = 0; fh < fH; ++fh) {
         int h_in = h_start + fh;
-        int row_offset = batch_offset + (h_in * W_in) * C;
+        int row_offset = batch_offset + (h_in * W_pad) * C;
 
         for (int fw = 0; fw < fW; ++fw) {
             int w_in = w_start + fw;
@@ -53,16 +56,19 @@ void $kernel_name(
     float* __restrict__ dinputs,
     const int S, const int H_pad, const int W_pad, const int C,
     const int fH, const int fW, const int sH, const int sW,
-    const int H_out, const int W_out
+    const int H_out, const int W_out,
+    const unsigned int magic_scale, const int magic_shift  
 ) {
     int c = blockIdx.x * blockDim.x + threadIdx.x;
     int w_out = blockIdx.y * blockDim.y + threadIdx.y;
+    if (c >= C || w_out >= W_out) return;
+
     int h_s = blockIdx.z * blockDim.z + threadIdx.z;
+    unsigned long long prod = (unsigned long long)h_s * magic_scale;
+    int s = (int)(prod >> (32 + magic_shift));
+    if (s >= S) return;
 
-    int h_out = h_s % H_out;
-    int s = h_s / H_out;
-
-    if (c >= C || w_out >= W_out || s >= S) return;
+    int h_out = h_s - (s * H_out);
 
     int out_idx = ((s * H_out + h_out) * W_out + w_out) * C + c;
     int src_idx = max_indices[out_idx];
@@ -78,16 +84,19 @@ void $kernel_name(
     float* __restrict__ dinputs,
     const int S, const int H_pad, const int W_pad, const int C,
     const int fH, const int fW, const int sH, const int sW,
-    const int H_out, const int W_out
+    const int H_out, const int W_out,
+    const unsigned int magic_scale, const int magic_shift  
 ) {
     int c = blockIdx.x * blockDim.x + threadIdx.x;
     int w_out = blockIdx.y * blockDim.y + threadIdx.y;
+    if (c >= C || w_out >= W_out) return;
+
     int h_s = blockIdx.z * blockDim.z + threadIdx.z;
+    unsigned long long prod = (unsigned long long)h_s * magic_scale;
+    int s = (int)(prod >> (32 + magic_shift));
+    if (s >= S) return;
 
-    int h_out = h_s % H_out;
-    int s = h_s / H_out;
-
-    if (c >= C || w_out >= W_out || s >= S) return;
+    int h_out = h_s - (s * H_out);
 
     int h_start = h_out * sH;
     int w_start = w_out * sW;
@@ -113,7 +122,7 @@ _MAX_OP = {
     "name": "max",
     "aux_out_decl": "int* __restrict__ max_indices,",
     "reduce_init": (
-        "int initial_idx = batch_offset + (h_start * W_in + w_start) * C + c;\n"
+        "int initial_idx = batch_offset + (h_start * W_pad + w_start) * C + c;\n"
         "    float max_val = x[initial_idx];\n"
         "    int best_idx = initial_idx;"
     ),
@@ -123,11 +132,12 @@ _MAX_OP = {
     ),
     "writeback": "out[out_idx] = max_val;\n    max_indices[out_idx] = best_idx;",
 }
+
 _MAX_OP_INFERENCE = {
     "name": "max_inference",
     "aux_out_decl": "",
     "reduce_init": (
-        "int initial_idx = batch_offset + (h_start * W_in + w_start) * C + c;\n"
+        "int initial_idx = batch_offset + (h_start * W_pad + w_start) * C + c;\n"
         "    float max_val = x[initial_idx];"
     ),
     "reduce_body": (
