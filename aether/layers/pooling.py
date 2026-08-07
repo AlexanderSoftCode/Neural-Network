@@ -93,8 +93,18 @@ class _PoolNd(Layer):
             fH, fW = self.filter_size
             sH, sW = self.stride
 
-            block_x = min(32, C)
-            block_y = 8
+            # Block axes should combine to 1024 for CUDA (block_z=4)
+            # or 512 for HIP (block_z=2)
+            target_threads = 1024 if block_z == 4 else 512
+            target_2d = target_threads // block_z # Always 256
+
+            if C <= 32:
+                block_x = max(1, C)
+                block_y = target_2d // block_x
+            else:
+                block_x = min(32, C)
+                block_y = 8
+
             block_dim = (block_x, block_y, block_z)
 
             grid_x = (C + block_x - 1) // block_x
