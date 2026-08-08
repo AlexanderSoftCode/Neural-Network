@@ -14,7 +14,15 @@ class AetherBaseTestCase(unittest.TestCase):
     pointers and standard environment cleaning methods between hardware
     backend swaps.
     """
+    __test__ = False  # Suppress standalone discovery of the base class
 
+    def __init_subclass__(cls, *args, **kwargs):
+        super().__init_subclass__(*args, **kwargs)
+        cls.__test__ = True
+
+    def shortDescription(self):
+        """Docstrings are ommitted when running verbose -v unit tests"""
+        return None
     def make_layer(self, layer_cls, **kwargs):
         """Construct a layer and, if it supports device compilation,
         bind it to the currently active backend.

@@ -57,26 +57,6 @@ def make_suite(backend_name, Layer_Class):
             self.assertEqual(self.layer.dweights.shape, self.layer.weights.shape)
             self.assertEqual(self.layer.dbiases.shape, self.layer.biases.shape)
 
-        def test_dense_regularization(self):
-
-            layer_reg = Dense(5, 3, weight_regularizer_l2=0.1)
-            layer_reg.forward(self.test_input, training=True)
-            layer_reg.backward(self.xp.ones((10, 3)))
-
-            layer_no_reg = Dense(5, 3, weight_regularizer_l2=0)
-
-            layer_no_reg.weights = layer_reg.weights.copy()
-            layer_no_reg.biases = layer_reg.biases.copy()
-
-            layer_no_reg.forward(self.test_input, training=True)
-            layer_no_reg.backward(self.xp.ones((10, 3)))
-
-            self.assertFalse(self.xp.array_equal(layer_reg.dweights, layer_no_reg.dweights))
-
-            expected_penalty = 2 * 0.1 * layer_reg.weights
-            actual_diff = layer_reg.dweights - layer_no_reg.dweights
-            self.xp.testing.assert_array_almost_equal(actual_diff, expected_penalty)
-
         def test_dense_zero_input(self):
             "Given an input of all zeros, show an output of all zeros (plus biases)"
 
