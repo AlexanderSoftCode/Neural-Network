@@ -447,3 +447,24 @@ class AvgPool2d(_PoolNd):
                 :
             ]
             return self.dinputs
+
+class GlobalAvgPool(Layer):
+    def __init__(self):
+        super().__init__()
+        self._launch_cache = {}
+
+    def forward(self, inputs, training):
+        xp = config.get_array_module(inputs)
+        self.inputs_shape = inputs.shape
+        self.output = xp.average(inputs, axis=(1, 2))
+        return self.output
+
+    def backward(self, dvalues):
+        xp = config.get_array_module(dvalues)
+        S, H, W, C = self.inputs_shape
+        avg_weight = np.float32(1.0 / (H * W))
+
+        dvalues4d = dvalues[:, xp.newaxis, xp.newaxis, :]
+        dvalues4d = xp.broadcast_to(dvalues4d, shape=(S,H,W,C))
+        self.dinputs = dvalues4d * avg_weight
+        return self.dinputs
