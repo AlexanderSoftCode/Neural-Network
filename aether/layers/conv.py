@@ -54,11 +54,11 @@ class Conv(Layer):
         H_out = int((H_in + 2 * self.forward_pad_h - self.filter_size[0]) / self.stride[0] + 1)
         W_out = int((W_in + 2 * self.forward_pad_w - self.filter_size[1]) / self.stride[1] + 1)
         
-        #(0, 0) -> don't touch the number of samples in the batch
-        #(P, P) -> pad top and bottom pixels by P pixels (axis 1)
-        #(P, P) -> pad left and right pixels by P pixels (axis 2)
-        #(0, 0) -> don't pad depth. 
-        #contstant -> add constant_values for the padded values
+        # (0, 0) -> don't touch the number of samples in the batch
+        # (P, P) -> pad top and bottom pixels by P pixels (axis 1)
+        # (P, P) -> pad left and right pixels by P pixels (axis 2)
+        # (0, 0) -> don't pad depth. 
+        # contstant -> add constant_values for the padded values
         padded_inputs = xp.pad(array = inputs, 
                             pad_width = ((0, 0), (self.forward_pad_h, self.forward_pad_h), (self.forward_pad_w, self.forward_pad_w), (0, 0)),
                             mode = 'constant',
@@ -81,7 +81,7 @@ class Conv(Layer):
             )
         )
 
-        # Keep the samples, h_out, w_out, and the number of channels out. 
+        # Keep the samples, h_out, w_out, and C_out. 
         # But, iterate over the patch(x, y) with channels c, and with the number of filters d
         self.output = xp.einsum('shwxyc,xycd->shwd', self.patches, self.filter_weights, optimize=True)
         self.output += self.biases.reshape((1, 1, 1, self.C_out)) 
@@ -148,196 +148,10 @@ class Conv(Layer):
 
         return self.dinputs
     
-class Pooling(Layer):
+    @property
+    def weights(self):
+        return self.filter_weights
 
-    def __init__(self, filter_size = (2, 2), strides = (2, 2),
-                  padding = "valid", pooling_type = "max"):
-
-        self.filter_size = filter_size
-        self.stride = strides
-        self.padding = padding
-        self.pooling_type = pooling_type
-        
-    def forward(self, inputs, training):
-
-        xp = config.get_array_module(inputs)
-        as_strided = config.get_stride_utility(xp)
-        #Inputs should be of shape (S, H_in, W_in, C = D_in) 
-        if inputs.ndim != 4:
-            raise ValueError(f"Expected a 4D tensor, got {inputs.ndim} instead.")
-        self.inputs = inputs
-        S, H_in, W_in, C = inputs.shape
-        fH, fW = self.filter_size
-        sH, sW = self.stride
-
-        padding = self.padding
-        if padding == "valid":
-            H_out = int(xp.floor((H_in - fH) / sH + 1).item())
-            W_out = int(xp.floor((W_in - fW) / sW + 1).item())
-
-            self.pad_top, self.pad_bottom, self.pad_left, self.pad_right = 0, 0, 0, 0
-            inputs_padded = inputs
-        elif padding == "same":
-            
-            H_out = int(xp.ceil(H_in / sH).item())
-            W_out = int(xp.ceil(W_in / sW).item())
-
-            pad_h = max((H_out - 1) * sH + fH - H_in, 0)
-            pad_w = max((W_out - 1) * sW + fW - W_in, 0)
-            self.pad_top = pad_h // 2
-            self.pad_bottom = pad_h - self.pad_top
-            self.pad_left = pad_w // 2
-            self.pad_right = pad_w - self.pad_left
-            inputs_padded = xp.pad(inputs, ((0,0), (self.pad_top,self.pad_bottom), (self.pad_left,self.pad_right), (0,0)))
-        else: 
-            raise ValueError(f"Expected padding == valid or same, recieved {padding} instead")
-
-        #cast our output dimensions into ints from floats. 
-        H_out, W_out = int(H_out), int(W_out)
-
-        #create output tensor with new sizes
-        self.output = xp.zeros(shape = (S, H_out, W_out, C))
-        patches = as_strided(
-            inputs_padded,
-            shape = (S, H_out, W_out, fH, fW, C), 
-            strides = (
-                inputs_padded.strides[0],      # Step between samples
-                inputs_padded.strides[1] * sH, # Step between rows
-                inputs_padded.strides[2] * sW, # Step between columns
-                inputs_padded.strides[1],      # Move down 1 row inside patch
-                inputs_padded.strides[2],      # Move right 1 col inside patch
-                inputs_padded.strides[3],      # Step between each channel
-            )
-        )
-
-        if self.pooling_type == "max":
-            pooled = patches.max(axis = (3, 4)) 
-            #We'll reshape the window to become a 1d array of size fH * fW
-            patches_reshaped = patches.reshape(S, H_out, W_out, fH * fW, C)
-            flat_indicies = patches_reshaped.argmax(axis = 3)
-
-            #Now, we'll convert those flat indicies back to row col coordinates withing each
-            #(fH, fW) patch
-            max_rows, max_cols = xp.unravel_index(flat_indicies, (fH, fW)) 
-            self.max_indicies = (max_rows, max_cols) 
-        
-        elif self.pooling_type == "average":
-            pooled = patches.mean(axis = (3, 4))
-
-        self.output = pooled
-        return self.output
-    
-    def backward(self, dvalues):
-
-        xp = config.get_array_module(dvalues)
-        as_strided = config.get_stride_utility(xp)
-        S, H_out, W_out, C = dvalues.shape
-        fH, fW = self.filter_size
-        sH, sW = self.stride
-        _, H_in, W_in, _ = self.inputs.shape
-
-        if self.padding == "valid":
-            pad_top = pad_bottom = pad_left = pad_right = 0
-            padded_H, padded_W = H_in, W_in
-            inputs_padded = self.inputs
-        else:  #padding == "same": 
-                
-            pad_top = self.pad_top
-            pad_bottom = self.pad_bottom
-            pad_left = self.pad_left
-            pad_right = self.pad_right
-
-            padded_H = H_in + pad_top + pad_bottom
-            padded_W = W_in + pad_left + pad_right
-            inputs_padded = xp.pad(self.inputs, ((0,0), (pad_top, pad_bottom), (pad_left, pad_right), (0, 0)))
-
-        if self.pooling_type == "max":
-            if self.stride == self.filter_size:    # Non-overlapping windows
-                
-                dinputs_padded = xp.zeros((S, padded_H, padded_W, C), dtype=dvalues.dtype)
-                #compute non-overlapping windows
-                patches = as_strided(
-                    inputs_padded,
-                    shape = (S, H_out, W_out, fH, fW, C), 
-                    strides = (
-                        inputs_padded.strides[0],      # Step between samples
-                        inputs_padded.strides[1] * sH, # Step between rows
-                        inputs_padded.strides[2] * sW, # Step between columns
-                        inputs_padded.strides[1],      # Move down 1 row inside patch
-                        inputs_padded.strides[2],      # Move right 1 col inside patch
-                        inputs_padded.strides[3],      # Step between each channel
-                    )
-                )
-                expanded_output = self.output[:, :, :, xp.newaxis, xp.newaxis, :]
-                mask = (patches == expanded_output)
-
-                #expand upstream gradient 
-                expanded_dvalues = dvalues[:, :, :, xp.newaxis, xp.newaxis, :]
-                dpatches = expanded_dvalues * mask
-
-                dinputs_canvas = dpatches.transpose(0, 1, 3, 2, 4, 5).reshape(S, H_out * fH, W_out * fW, C)
-                
-                dinputs_padded[:, :H_out * fH, :W_out * fW, :] = dinputs_canvas
-                self.dinputs = dinputs_padded[:, pad_top : pad_top + H_in, pad_left : pad_left + W_in, :]
-
-            else:                                   # Branch where windows overlap
-                
-                max_rows, max_cols = self.max_indicies
-                dinputs_padded = xp.zeros((S, padded_H, padded_W, C), dtype=dvalues.dtype)
-                s_idx, h_idx, w_idx, c_idx = xp.ogrid[:S, :H_out, :W_out, :C]
-
-                input_h = (h_idx * sH) + max_rows
-                input_w = (w_idx * sW) + max_cols
-
-                xp.add.at(dinputs_padded, (s_idx, input_h, input_w, c_idx), dvalues)
-
-                self.dinputs = dinputs_padded[:, 
-                            pad_top : pad_top + H_in, 
-                            pad_left : pad_left + W_in, :]       
-        if self.pooling_type == "average":
-            if self.stride == self.filter_size: # Non-overlapping windows
-
-                scaled_dvalues = dvalues / (fH * fW)
-                # expand spatial height and width by fH and fW
-                dinputs_canvas = xp.repeat(xp.repeat(scaled_dvalues, fH, axis=1), fW, axis=2)
-                
-                dinputs_padded = xp.zeros((S, padded_H, padded_W, C), dtype=dvalues.dtype)
-                dinputs_padded[:, :H_out * fH, :W_out * fW, :] = dinputs_canvas
-                self.dinputs = dinputs_padded[:, pad_top : pad_top + H_in, pad_left : pad_left + W_in, :]
-                
-            else:                                   # Branch where windows overlap
-
-                dilated_H = (H_out - 1) * sH + 1
-                dilated_W = (W_out - 1) * sW + 1
-
-                dvalues_dilated = xp.zeros((S, dilated_H, dilated_W, C), dtype=dvalues.dtype)                
-                dvalues_dilated[:, ::sH, ::sW, :] = dvalues
-                
-                backward_pad_top = (fH - 1) - pad_top
-                backward_pad_left = (fW - 1) - pad_left
-                backward_pad_bottom = (H_in + pad_top + self.pad_bottom + fH - 1) - dilated_H - backward_pad_top
-                backward_pad_right = (W_in + pad_left + self.pad_right + fW - 1) - dilated_W - backward_pad_left
-                dvalues_padded = xp.pad(dvalues_dilated, pad_width = (
-                    (0, 0), (backward_pad_top, backward_pad_bottom), (backward_pad_left, backward_pad_right), (0, 0)
-                ))
-
-                dvalues_patches = as_strided(
-                    dvalues_padded,
-                    shape=(S, padded_H, padded_W, fH, fW, C),
-                    strides=(
-                        dvalues_padded.strides[0],       # step between samples
-                        dvalues_padded.strides[1],       # step down a padded row
-                        dvalues_padded.strides[2],       # step across a padded column 
-                        dvalues_padded.strides[1],       # move down 1 row inside patch
-                        dvalues_padded.strides[2],       # move right 1 col inside patch
-                        dvalues_padded.strides[3],       # step across channels
-                    ))
-                dinputs_padded = dvalues_patches.sum(axis=(3, 4)) * (1.0 / (fH * fW))
-                self.dinputs = dinputs_padded[
-                    :, 
-                    pad_top : pad_top + H_in, 
-                    pad_left : pad_left + W_in, 
-                    :
-                ]
-
-        return self.dinputs
+    @weights.setter
+    def weights(self, value):
+        self.filter_weights = value

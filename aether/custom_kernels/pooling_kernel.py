@@ -47,7 +47,7 @@ void $kernel_name(
 }
 ''')
 
-_MAX_BACKWARD_DIRECT_TEMPLATE = Template(r'''
+_MAX_BACKWARD_NONOVERLAP_TEMPLATE = Template(r'''
 $hip_include
 extern "C" __global__
 void $kernel_name(
@@ -209,7 +209,7 @@ def _get_compiled_max_backward_kernel(variant: str):
     """Compiles/retrieves the MaxPool2d non-overlapping backward RawKernel.
 
     Unlike forward compilation, this does not go through op-dict substitution —
-    _MAX_BACKWARD_DIRECT_TEMPLATE is a fully specialized kernel (direct
+    _MAX_BACKWARD_NONOVERLAP_TEMPLATE is a fully specialized kernel (direct
     argmax-indexed write, no per-window loop needed since max_indices already
     holds the flat source index from the forward pass). Only $hip_include and
     $kernel_name are templated.
@@ -219,7 +219,7 @@ def _get_compiled_max_backward_kernel(variant: str):
         return _pool_kernel_cache[cache_key]
 
     kernel_name = f"pool2d_backward_max_nonoverlap_{variant}_kernel"
-    source = _MAX_BACKWARD_DIRECT_TEMPLATE.substitute(
+    source = _MAX_BACKWARD_NONOVERLAP_TEMPLATE.substitute(
         hip_include="#include <hip/hip_runtime.h>\n" if variant == "hip" else "",
         kernel_name=kernel_name,
     )
