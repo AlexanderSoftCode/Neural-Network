@@ -1,6 +1,9 @@
 from string import Template
 import aether.config as config
 
+# thread_idx = local coordinate inside the block
+# blockDim = size/capacity inside a single block (512 or 1024)
+# blockIdx = global block coordinate inside the grid
 _POOL_FORWARD_TEMPLATE = Template(r'''
 $hip_include
 extern "C" __global__
@@ -118,6 +121,61 @@ void $kernel_name(
 }
 ''')
 
+_GAP_FORWARD_TEMPLATE = Template(r'''
+$hip_include
+extern "C" __global__
+void $kernel_name(
+    const float* __restrict__ x,
+    float* __restrict__ out,
+    const int S, const int H, const int W, const int C,
+    float inv_area
+) {
+    int c = blockIdx.x * blockDim.x + threadIdx.x; 
+    int s = blockIdx.y * blockDim.y + threadIdx.y;
+    if (c >= C || s >= S) return;
+
+    int out_idx = s * C + c;
+    int batch_offset = s * (H * W * C);
+    float sum = 0.0f; 
+    for(int h = 0; h < H; ++h){
+        int row_offset = batch_offset + h * (W * C);
+        for(int w = 0; w < W; ++w){ 
+            int flat_idx = row_offset + w * C + c;
+            sum += x[flat_idx];
+        }
+    }
+
+    out[out_idx] = sum * inv_area;
+}
+''')
+
+_GAP_BACKWARD_TEMPLATE = Template(r'''
+$hip_include
+extern "C" __global__
+void $kernel_name(
+    const float* __restrict__ dvalues,
+    float* __restrict__ dinputs,
+    const int S, const int H, const int W, const int C,
+    float inv_area
+) {
+    int c = blockIdx.x * blockDim.x + threadIdx.x;
+    int s = blockIdx.y * blockDim.y + threadIdx.y; 
+    
+    if (c >= C || s >= S) return; 
+    int dout_idx = s * C + c;
+    float scaled_grad = dvalues[dout_idx] * inv_area;
+    int batch_offset = s * (H * W * C);
+
+    for(int h = 0; h < H; ++h){
+        int row_offset = batch_offset + h * (W * C);
+        for(int w = 0; w < W; ++w){
+            int flat_idx = row_offset + w * C + c;
+            dinputs[flat_idx] = scaled_grad;
+        }
+    }
+}
+
+''')
 _MAX_OP = {
     "name": "max",
     "aux_out_decl": "int* __restrict__ max_indices,",
@@ -256,11 +314,11 @@ def _get_compiled_avg_backward_kernel(variant: str):
     _pool_kernel_cache[cache_key] = kernel
     return kernel
 
-# Helper Functions for MaxPool2D
-def is_gpu_max_pool2d_available() -> bool:
-    """Checks if CuPy hardware support and kernels are loaded."""
+def _is_gpu_pooling_available() -> bool:
+    """Internal check for CuPy hardware support across all pooling layers."""
     return config.HAS_CUPY
 
+# Helper Functions for MaxPool2D
 def get_max_pool2d_forward_kernel(variant: str, training: bool = True):
     """Returns a compiled RawKernel for the given variant ('cuda' or 'hip').
     Memoized via _pool_kernel_cache — no lazy self-rewriting needed.
@@ -279,11 +337,8 @@ def get_max_pool2d_backward_kernel(variant: str):
     that requires the atomic/scatter-add fallback path instead.
     """
     return _get_compiled_max_backward_kernel(variant)
-# Helper Functions for AvgPool2d
-def is_gpu_avg_pool2d_available():
-    """Checks if CuPy hardware support and kernels are loaded."""
-    return config.HAS_CUPY
 
+# Helper Functions for AvgPool2d
 def get_avg_pool2d_forward_kernel(variant: str):
     """Returns a compiled RawKernel for the given variant ('cuda' or 'hip').
     Memoized via _pool_kernel_cache — no lazy self-rewriting needed.
@@ -297,3 +352,56 @@ def get_avg_pool2d_backward_kernel(variant: str):
     that requires the atomic/scatter-add fallback path instead.
     """
     return _get_compiled_avg_backward_kernel(variant)
+
+# Helper Functions for GlobalAvgPool
+
+def get_gap_forward_kernel(variant: str):
+    """Returns a compile RawKernel/Reduction kernel for GlobalAvgPool forward
+    pass"""
+
+    return _get_compiled_gap_forward_kernel(variant)
+
+def get_gap_backward_kernel(variant: str):
+    """Returns a compiled RawKernel for GlobalAvgPool backward"""
+
+    return _get_compiled_gap_backward_kernel(variant)
+def _get_compiled_gap_forward_kernel(variant: str):
+    """Compiles/retrieves the GlobalAvgPool, memoizing it inside a dictionary lookup
+    """
+    cache_key = ("gap_forward", variant)
+    if cache_key in _pool_kernel_cache:
+        return _pool_kernel_cache[cache_key]
+
+    kernel_name = f"gap_forward_{variant}_kernel"
+    source = _GAP_FORWARD_TEMPLATE.substitute(
+        hip_include="#include <hip/hip_runtime.h>\n" if variant == "hip" else "",
+        kernel_name = kernel_name,
+    )
+    kernel = config.build_kernel(
+        lambda: config.cp.RawKernel(source, kernel_name),
+        name=f"gap_forward_{kernel_name}"
+    )
+
+    _pool_kernel_cache[cache_key] = kernel
+    return kernel 
+
+def _get_compiled_gap_backward_kernel(variant: str): 
+
+    """Compiles/retrieves the GlobalAvgPool, memoizing it inside a dictionary lookup
+    """
+    cache_key = ("gap_backward", variant)
+    if cache_key in _pool_kernel_cache:
+        return _pool_kernel_cache[cache_key]
+
+    kernel_name = f"gap_backward_{variant}_kernel"
+    source = _GAP_BACKWARD_TEMPLATE.substitute(
+        hip_include="#include <hip/hip_runtime.h>\n" if variant == "hip" else "",
+        kernel_name = kernel_name,
+    )
+    kernel = config.build_kernel(
+        lambda: config.cp.RawKernel(source, kernel_name),
+        name=f"gap_backward_{kernel_name}"
+    )
+
+    _pool_kernel_cache[cache_key] = kernel
+    return kernel 
