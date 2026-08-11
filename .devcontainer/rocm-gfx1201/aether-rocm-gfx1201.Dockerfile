@@ -1,0 +1,82 @@
+# ==============================================================================
+# Aether-ML ROCm 7.14 Container
+# Target GPU Architecture: RDNA4 (gfx1201)
+# Runtime Capabilities: rocWMMA / Matrix Cores, Python 3.14
+# ==============================================================================
+
+FROM ubuntu:26.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+ENV ROCM_HOME=/opt/rocm \
+    ROCM_PATH=/opt/rocm \
+    HIP_PATH=/opt/rocm \
+    AMDGPU_TARGETS=gfx1201 \
+    GPU_TARGETS=gfx1201 \
+    PATH="/opt/rocm/bin:${PATH}"
+
+ENV CUPY_CACHE_DIR=/app/.devcontainer/.cupy_cache
+
+WORKDIR /workspace
+
+# ------------------------------------------------------------------------------
+# Step 1: Install Base OS Packages & Setup ROCm 7.14 Apt Repository
+# ------------------------------------------------------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    wget \
+    gnupg \
+    build-essential \
+    git \
+    sudo \
+    && mkdir --parents --mode=0755 /etc/apt/keyrings \
+    && wget https://repo.amd.com/rocm/packages-multi-arch/gpg/rocm.gpg -O - | \
+       gpg --dearmor | tee /etc/apt/keyrings/amdrocm.gpg > /dev/null \
+    && echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/amdrocm.gpg] https://repo.amd.com/rocm/packages-multi-arch/ubuntu2604 stable main" \
+       > /etc/apt/sources.list.d/rocm.list \
+    && rm -rf /var/lib/apt/lists/*
+
+# ------------------------------------------------------------------------------
+# Step 2: Install ROCm Dev Meta-Package & Python 3.14
+# ------------------------------------------------------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    amdrocm-core-dev7.14-gfx1201 \
+    python3.14 \
+    python3.14-dev \
+    python3.14-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN find /opt/rocm/ -name "rocwmma.hpp" | grep -q . || \
+    (echo "ERROR: rocwmma.hpp not found under /opt/rocm/" && exit 1)
+
+# ------------------------------------------------------------------------------
+# Step 3: Python Virtual Environment & CuPy Build
+# ------------------------------------------------------------------------------
+ENV VIRTUAL_ENV=/opt/venv
+RUN python3.14 -m venv $VIRTUAL_ENV
+ENV PATH="$VIRTUAL_ENV/bin:${PATH}"
+
+ENV CUPY_INSTALL_USE_HIP=1
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel cython && \
+    pip install --no-cache-dir numpy && \
+    pip install --no-cache-dir cupy jupyterlab
+
+# ------------------------------------------------------------------------------
+# Step 4: Non-root User Setup & Workspace Directory
+# ------------------------------------------------------------------------------
+RUN mkdir -p /app \
+    && getent group video || groupadd video \
+    && getent group render || groupadd render \
+    && usermod -aG video,render ubuntu \
+    && echo "ubuntu ALL=(root) NOPASSWD: /usr/local/bin/fix-gpu-groups.sh" > /etc/sudoers.d/ubuntu \
+    && chmod 0440 /etc/sudoers.d/ubuntu \
+    && chown -R ubuntu:ubuntu /app /opt/venv
+
+COPY --chmod=0755 .devcontainer/rocm-gfx1201/fix-gpu-groups.sh /usr/local/bin/fix-gpu-groups.sh
+
+WORKDIR /app
+
+EXPOSE 8888
+
+CMD ["jupyter", "lab", "--ip=0.0.0.0", "--no-browser"]
