@@ -1,6 +1,6 @@
 import copy
 import pickle
-from aether.blocks.CNN_classes_cupy import * 
+import aether.config as config
 
 class Model:
 
@@ -52,19 +52,19 @@ class Model:
             if hasattr(self.layers[i], 'weights'):
                 self.trainable_layers.append(self.layers[i])
 
+        for layer in self.layers:
+            if hasattr(layer, "build"):
+                layer.build()
+                
         #update loss object with trainable layers
         if self.loss is not None:
             self.loss.remember_trainable_layers(self.trainable_layers)
 
-        
-        if isinstance(self.layers[-1], SoftMax) and \
-            isinstance(self.loss, Loss_CategoricalCrossEntropy):
-            #create an object of combined activation and loss functions
-            self.softmax_classifier_output = \
-            Activation_Softmax_Loss_CategoricalCrossEntropy(self.loss.label_smoothing)
+            self.softmax_classifier_output=self.loss.get_fused_loss(self.layers[-1])
 
     def train(self, X, y, *, epochs = 1, batch_size = None, print_every = 1, validation_data = None):
 
+        xp = config.get_array_module(X)
         #Initialize accuracy object
         self.accuracy.init(y)
 
@@ -262,18 +262,40 @@ class Model:
         
     def to(self, device):
         """
-        Ahead-Of-Time compilation and device migration step.
-        """
+        Ahead-Of-Time compilation and device migration.
 
+        Configures the global execution backend (numpy or cupy) and
+        recursively prepares all components device backend, and dedicated
+        kernels if user is using cupy.
+
+        Args:
+            device (str): The target hardware execution device 
+            ('cupy' or 'numpy)
+        Raises:
+            ValueError: If `device` specifies an unsupported or unconfigured backend
+        
+        Note:
+            Method must be called prior to training or evaluation if switching backends
+            (e.g., NumPy to CuPy), as it triggers internal array migrations and kernel
+            allocations across all underlying components.
+        """
         target_device = device.lower()
         config.set_backend(target_device)
         self.device = target_device
 
         for layer in self.layers:
-            layer._compile_for_device(target_device)
+            if hasattr(layer, '_compile_for_device'):
+                layer._compile_for_device(target_device)
                         
-        self.optimizer._compile_for_device(target_device)
-        
+        if hasattr(self, 'optimizer') and hasattr(self.optimizer, '_compile_for_device'):
+            self.optimizer._compile_for_device(target_device)
+
+        if hasattr(self, 'loss') and hasattr(self.loss, '_compile_for_device'):
+            self.loss._compile_for_device(target_device)
+
+        if hasattr(self, 'accuracy') and hasattr(self.accuracy, '_compile_for_device'):
+            self.accuracy._compile_for_device(target_device)        
+
     #Returns paramteres of trainable layers
     def get_parameters(self):
         parameters = []
@@ -331,6 +353,7 @@ class Model:
         return model
     
     def predict(self, X, *, batch_size = None):
+        xp = config.get_array_module(X)
         prediction_steps = 1
         if batch_size is not None:
             prediction_steps = len(X) // batch_size
@@ -353,53 +376,8 @@ class Model:
             output.append(batch_output)
         
         #stack and return results
-        return cp.vstack(output)
-    
-class Accuracy:
-    #Givers the accuracy of the prediction sand truth values
-    def calculate(self, predictions, y):
-
-        comparisons = self.compare(predictions, y)
-
-        accuracy = cp.mean(comparisons) 
-    
-        self.accumulated_sum += cp.sum(comparisons)
-        self.accumulated_count += len(comparisons)
-
-    
-        return accuracy
-
-    def calculate_accumulated(self):
-        accuracy = self.accumulated_sum / self.accumulated_count
-        return accuracy
-    def new_pass(self):
-        self.accumulated_sum = 0
-        self.accumulated_count = 0
-    
-    def predict(self, X, *, batch_size = None):
-        prediction_steps = 1
-class Accuracy_Regression(Accuracy):
-
-    def __init__(self):
-        self.precision = None
-    
-    #Now we are getting the precision value
-    def init(self, y, reinit = False):
-        if self.precision is None or reinit:
-            self.precision = cp.std(y) / 250 
-    
-    def compare(self, predictions, y):
-        return cp.absolute(predictions - y) < self.precision
-
-class Accuracy_Categorical(Accuracy):
-    def init(self, y):
-        pass
-    
-    def compare(self, predictions, y):
-        if len(y.shape) == 2:
-            y = cp.argmax(y, axis = 1)
-        return predictions == y
-    
+        return xp.vstack(output)
+        
 class Layer_Input: 
     def forward(self, inputs, training):
         self.output = inputs

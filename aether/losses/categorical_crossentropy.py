@@ -7,7 +7,11 @@ from aether.layers.activations import SoftMax
 class Loss: 
     def __init__(self):
         self.new_pass()
-        
+
+    def get_fused_loss(self, last_layer):
+        """Returns a fused activation+loss object if supported, else None"""
+        return None
+    
     def remember_trainable_layers(self, trainable_layers):
         self.trainable_layers = trainable_layers
 
@@ -37,10 +41,10 @@ class Loss:
         self.accumulated_count = 0
 
     def regularization_loss(self):
-        xp = config.get_array_module(layer.weights)
         regularization_loss = 0             #if we don't do this, we risk overfitting.
                                             #We will have to denote partials for this too...
         for layer in self.trainable_layers:        
+            xp = config.get_array_module(layer.weights)
             if layer.weight_regularizer_l1 > 0:
                 regularization_loss += layer.weight_regularizer_l1 * \
                                         xp.sum(xp.abs(layer.weights))
@@ -55,7 +59,7 @@ class Loss:
                                         xp.sum(layer.biases * layer.biases) 
         return regularization_loss
 
-class Loss_CategoricalCrossEntropy(Loss): 
+class CategoricalCrossEntropy(Loss): 
     def __init__(self, label_smoothing = 0.0):
         super().__init__()
         self.label_smoothing = label_smoothing 
@@ -80,7 +84,7 @@ class Loss_CategoricalCrossEntropy(Loss):
         
         return loss
     
-    def backward(self, dvalues, y_true):
+    def backward(self, dvalues, y_true, training=True):
         xp = config.get_array_module(dvalues)
         samples = len(dvalues)
         n_classes = dvalues.shape[1]
@@ -102,13 +106,19 @@ class Loss_CategoricalCrossEntropy(Loss):
         #calculate CE gradient
         self.dinputs = -y_true / dvalues_clip / samples 
 
-class Activation_Softmax_Loss_CategoricalCrossEntropy(Loss):
+class SoftmaxCategoricalCrossEntropy(Loss):
     def __init__(self, label_smoothing = 0.0):
         self.activation = SoftMax()
-        self.loss = Loss_CategoricalCrossEntropy(label_smoothing)
+        self.loss = CategoricalCrossEntropy(label_smoothing)
         self.label_smoothing = label_smoothing
         super().__init__()
 
+    def get_fused_loss(self, last_layer):
+
+        if isinstance(last_layer, SoftMax):
+            return SoftmaxCategoricalCrossEntropy(label_smoothing=self.label_smoothing)
+        return None
+    
     def new_pass(self):
         super().new_pass()
         self.loss.new_pass()

@@ -6,7 +6,7 @@ from aether.custom_kernels.adam_kernel import _adam_update_kernel
 # General starting learning rate for SGD is 1.0, with a decay down to 0.1. For Adam, a good starting 
 # LR is 0.001 (1e-3), decaying down to 0.0001 (1e-4). Different problems may require different 
 # values here, but these are decent to start.
-class Optimizer_Adam:
+class Adam:
     def __init__(self, learning_rate=.001, decay=0., epsilon=1e-7, beta_1=0.9, beta_2=.999):
         self.learning_rate = learning_rate
         self.current_learning_rate = learning_rate
@@ -196,6 +196,12 @@ class Optimizer_Adam:
             layer.weights, layer.weight_momentums, layer.weight_cache,
         )
 
+        #Any layer that keeps a shadow low-precision cast of its weights 
+        # needs an explicit nudge
+        # here or it'll keep training on a stale cast.
+        if hasattr(layer, "invalidate_shadow_caches"):
+            layer.invalidate_shadow_caches()
+
         if getattr(layer, 'biases', None) is not None:
             b_dtype = layer.biases.dtype
             
@@ -218,7 +224,7 @@ class Optimizer_Adam:
                 layer.biases, layer.bias_momentums, layer.bias_cache,
             )
 
-class Optimizer_AdamW(Optimizer_Adam):
+class AdamW(Adam):
     def __init__(self, learning_rate=.001, decay=0., epsilon=1e-7,
                  beta_1=0.9, beta_2=.999, weight_decay=0.01):
         

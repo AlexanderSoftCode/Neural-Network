@@ -41,7 +41,10 @@ def to_device(array, target='cupy'):
         if HAS_CUPY and isinstance(array, cp.ndarray):
             return cp.asnumpy(array)
         return np.asarray(array)
-
+    else:
+        raise ValueError(
+            f"Invalid target device '{target}'. Supported device backends are 'numpy' and 'cupy'"
+        )
 def get_stride_utility(xp_module):
     """Unified helper for nested stride pathways."""
     return xp_module.lib.stride_tricks.as_strided
