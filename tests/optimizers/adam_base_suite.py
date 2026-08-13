@@ -4,7 +4,7 @@ import weakref
 import aether.config as config
 from tests.base_case import AetherBaseTestCase
 from aether.layers.linear import Dense
-
+from aether.layers.conv import Conv
 backends_to_test = ['numpy']
 try:
     import cupy as cp
@@ -35,7 +35,7 @@ def make_suite(backend_name, Optimizer_Class):
                 beta_2=self.BETA_2,
             )
 
-            self.layer = self.make_layer(
+            self.layer = self.make_built_layer(
                 Dense, n_inputs=self.N_INPUTS, n_neurons=self.N_NEURONS
             )
             self.layer.dweights = self.xp.random.randn(*self.layer.weights.shape).astype(
@@ -45,6 +45,21 @@ def make_suite(backend_name, Optimizer_Class):
                 self.xp.float32
             )
 
+        def make_layer_and_optimizer(self, Layer_Class, Optimizer_Class, xp):
+            # Dynamic layer creation matching current backend
+            layer = Layer_Class(
+                in_channels=1, out_channels=2, filter_size=(3, 3),
+                stride=(1, 1), padding="same",
+            )
+            layer.build()
+            if hasattr(layer, "_compile_for_device"):
+                layer._compile_for_device(backend_name)
+    
+            optimizer = Optimizer_Class(learning_rate=0.01)
+            if hasattr(optimizer, "_compile_for_device"):
+                optimizer._compile_for_device(backend_name)
+    
+            return layer, optimizer
         # ---- state initialization ---------------------------------------
 
         def test_first_update_initializes_momentum_and_cache(self):
@@ -86,7 +101,7 @@ def make_suite(backend_name, Optimizer_Class):
 
         def test_layer_tracking_does_not_prevent_garbage_collection(self):
             """Verify a dropped layer can still be garbage collected."""
-            throwaway_layer = self.make_layer(Dense, n_inputs=2, n_neurons=2)
+            throwaway_layer = self.make_built_layer(Dense, n_inputs=2, n_neurons=2)
             throwaway_layer.dweights = self.xp.random.randn(
                 *throwaway_layer.weights.shape
             ).astype(self.xp.float32)
@@ -219,7 +234,7 @@ def make_suite(backend_name, Optimizer_Class):
                 self.skipTest("GPU kernel test is only applicable to CuPy backend.")
 
             for dtype in [self.xp.float32, self.xp.float64]:
-                layer = Dense(n_inputs=2, n_neurons=2)
+                layer = self.make_built_layer(Dense, n_inputs=2, n_neurons=2)
                 layer.weights = layer.weights.astype(dtype)
                 layer.biases = layer.biases.astype(dtype)
                 layer.dweights = self.xp.ones(layer.weights.shape, dtype=dtype)
@@ -235,5 +250,55 @@ def make_suite(backend_name, Optimizer_Class):
                     )
 
                 self.assertTrue(self.xp.all(self.xp.isfinite(layer.weights)))
+
+        def test_gpu_update_invalidates_fp16_weight_cache(self):
+            # Pass closed-over factory variables rather than method arguments
+            if backend_name != "cupy":
+                self.skipTest("GPU cache test is only applicable to CuPy backend.")
+            layer, optimizer = self.make_layer_and_optimizer(
+                Conv, Optimizer_Class, self.xp
+            )
+
+            fixed_input = self.xp.random.randn(2, 8, 8, 1).astype(self.xp.float32)
+            dvalues = self.xp.ones((2, 8, 8, 2), dtype=self.xp.float32)
+
+            # First forward populates the fp16 shadow cache.
+            out_before = layer.forward(fixed_input, training=False).copy()
+            layer.backward(dvalues)
+
+            weights_before = layer.weights.copy()
+
+            # In-place kernel write to layer.weights
+            optimizer.update_parameters(layer)
+
+            # 1. The cache-validity flag must reflect reality.
+            self.assertFalse(
+                layer._fp16_weight_valid,
+                msg="invalidate_shadow_caches() was not called (or didn't run) "
+                "after the fused Adam kernel updated layer.weights in place",
+            )
+
+            # 2. Weights must have actually changed (sanity check)
+            self.assertFalse(
+                self.xp.allclose(weights_before, layer.weights),
+                msg="weights did not change after update_parameters -- kernel didn't run",
+            )
+
+            # 3. Forward output after step must differ from before
+            out_after = layer.forward(fixed_input, training=False)
+            self.assertFalse(
+                self.xp.allclose(out_before, out_after),
+                msg="forward() produced identical output after an optimizer step -- "
+                "this is the stale fp16 cache symptom",
+            )
+
+            # 4. Should match ground-truth cast
+            fH, fW, C_in, C_out = layer.filter_weights.shape
+            expected_fp16 = layer.filter_weights.reshape(
+                fH * fW * C_in, C_out
+            ).astype(self.xp.float16)
+            self.xp.testing.assert_array_equal(
+                layer._fp16_weight_cache, expected_fp16
+            )
 
     return TestOptimizerAdam

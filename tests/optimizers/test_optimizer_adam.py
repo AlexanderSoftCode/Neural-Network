@@ -1,7 +1,7 @@
-from aether.optimizers.adam import Optimizer_Adam
+from aether.optimizers.adam import Adam
 from tests.optimizers.adam_base_suite import make_suite, backends_to_test
 
-TARGET_LAYER = Optimizer_Adam
+TARGET_LAYER = Adam
 
 for backend in backends_to_test:
     suite_cls = make_suite(backend_name=backend, Optimizer_Class=TARGET_LAYER)

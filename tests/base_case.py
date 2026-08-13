@@ -32,7 +32,13 @@ class AetherBaseTestCase(unittest.TestCase):
         if hasattr(layer, '_compile_for_device'):
             layer._compile_for_device(self.backend_name)
         return layer
-    
+    def make_built_layer(self, layer_cls, **kwargs):
+        """Construct, bind to backend, and allocate array buffers for 
+        parameterized layers (e.g., Dense, Conv2D).
+        """
+        layer = self.make_layer(layer_cls, **kwargs)
+        layer.build()
+        return layer
     def tearDown(self):
         """Reset tracking state to system NumPy default safely between tests."""
         if config.HAS_CUPY:

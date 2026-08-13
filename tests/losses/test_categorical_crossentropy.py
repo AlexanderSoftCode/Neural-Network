@@ -1,8 +1,8 @@
 import aether.config as config
 from tests.base_case import AetherBaseTestCase
 
-from aether.losses.categorical_crossentropy import Loss_CategoricalCrossEntropy
-TARGET_LAYER = Loss_CategoricalCrossEntropy
+from aether.losses.categorical_crossentropy import CategoricalCrossEntropy
+TARGET_LAYER = CategoricalCrossEntropy
 
 backends_to_test = ['numpy']
 try:

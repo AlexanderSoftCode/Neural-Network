@@ -1,11 +1,11 @@
-from aether.optimizers.adam import Optimizer_AdamW
+from aether.optimizers.adam import AdamW
 from tests.optimizers.adam_base_suite import make_suite, backends_to_test
 
-TARGET_LAYER = Optimizer_AdamW
+TARGET_LAYER = AdamW
 
 for backend in backends_to_test:
     # 2. Generate the base class for AdamW
-    suite_cls = make_suite(backend_name=backend, Optimizer_Class=Optimizer_AdamW)
+    suite_cls = make_suite(backend_name=backend, Optimizer_Class=AdamW)
     class_name = f"Test_{TARGET_LAYER.__name__}_{backend.upper()}"
 
     def test_weight_decay_decoupled_update(self):

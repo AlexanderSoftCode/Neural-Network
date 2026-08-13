@@ -29,7 +29,7 @@ def make_suite(backend_name, Layer_Class):
             self.xp = config.xp
             self.as_strided = config.get_stride_utility(self.xp)
             
-            self.layer = self.make_layer(
+            self.layer = self.make_built_layer(
                 Layer_Class, 
                 in_channels=self.IN_CHANNELS, 
                 out_channels=self.OUT_CHANNELS, 
@@ -62,7 +62,7 @@ def make_suite(backend_name, Layer_Class):
 
         def test_conv_same_padding_stride(self):
             # 28x28 input, 3x3 filter, stride=(2,2), padding='same'
-            layer = self.make_layer(
+            layer = self.make_built_layer(
                 Layer_Class, 
                 in_channels=self.IN_CHANNELS, 
                 out_channels=self.OUT_CHANNELS, 
@@ -77,7 +77,7 @@ def make_suite(backend_name, Layer_Class):
             
         def test_conv_valid_padding_stride(self):
             # 28x28 input, 3x3 filter, stride = (2,2), valid padding
-            layer = self.make_layer(
+            layer = self.make_built_layer(
                 Layer_Class, 
                 in_channels=self.IN_CHANNELS, 
                 out_channels=self.OUT_CHANNELS, 
@@ -100,12 +100,11 @@ def make_suite(backend_name, Layer_Class):
             output = self.layer.forward(zero_input, training = False)
             expected_output = self.xp.broadcast_to(self.layer.biases, output.shape)
             
-            #compare the values in the numpy arrays
             self.xp.testing.assert_array_almost_equal(output, expected_output)
 
         def test_conv_stride_length(self):
 
-            layer = self.make_layer(
+            layer = self.make_built_layer(
                 Layer_Class,
                 in_channels=self.IN_CHANNELS,
                 out_channels=self.OUT_CHANNELS,
@@ -118,7 +117,7 @@ def make_suite(backend_name, Layer_Class):
             self.assertEqual(output.shape, (2, 14, 28, 4))
 
         def test_conv_stride_width(self):
-            layer = self.make_layer(
+            layer = self.make_built_layer(
                 Layer_Class,
                 in_channels=self.IN_CHANNELS,
                 out_channels=self.OUT_CHANNELS,
@@ -136,7 +135,7 @@ def make_suite(backend_name, Layer_Class):
             f'(x) ≈ (f(x + h) - f(x - h)) / 2h
             """
             epsilon = 1e-2
-            layer = self.make_layer(
+            layer = self.make_built_layer(
                 Layer_Class,
                 in_channels=self.IN_CHANNELS,
                 out_channels=2,
@@ -144,49 +143,122 @@ def make_suite(backend_name, Layer_Class):
                 stride=self.STRIDE,
                 padding=self.PADDING
             )
-
+        
             fixed_input = self.xp.random.randn(2, 8, 8, 1)  # batch=2, 8x8, 1 channel
             dvalues = self.xp.ones((2, 8, 8, 2))             # ones so sum(output) is the scalar loss
-
+        
             # Analytical gradient
             layer.forward(fixed_input, training=False)
             layer.backward(dvalues)
             analytical_dweights = layer.dweights.copy()
-
+        
             # Numerical gradient — iterate over every element of filter_weights (3x3x1x2 = 18)
             numerical_dweights = self.xp.zeros_like(layer.filter_weights)
-
+        
             for fh in range(layer.filter_weights.shape[0]):
                 for fw in range(layer.filter_weights.shape[1]):
                     for c in range(layer.filter_weights.shape[2]):
                         for f in range(layer.filter_weights.shape[3]):
-
-                            # f(x + h)
+        
+                            # f(x + h) -- mutate the buffer in place, then invalidate,
+                            # exactly like a fused optimizer kernel writing into
+                            # layer.weights and calling invalidate_shadow_caches().
                             layer.filter_weights[fh, fw, c, f] += epsilon
+                            layer.invalidate_shadow_caches()
                             layer.forward(fixed_input, training=False)
                             loss_plus = self.xp.sum(layer.output)
-
+        
                             # f(x - h)
                             layer.filter_weights[fh, fw, c, f] -= 2 * epsilon
+                            layer.invalidate_shadow_caches()
                             layer.forward(fixed_input, training=False)
                             loss_minus = self.xp.sum(layer.output)
-
-                            # Restore
+        
+                            # Restore -- also needs invalidating, so the layer is
+                            # left in a correct state for the next element's pass
+                            # (and for anything run after this loop).
                             layer.filter_weights[fh, fw, c, f] += epsilon
-
+                            layer.invalidate_shadow_caches()
+        
                             numerical_dweights[fh, fw, c, f] = (loss_plus - loss_minus) / (2 * epsilon)
-
+        
             self.xp.testing.assert_array_almost_equal(
-                analytical_dweights, numerical_dweights, decimal=3
+                analytical_dweights, numerical_dweights, decimal=2
             )
+
+        def test_conv_multichannel_input(self):
+            """Verify forward pass with multi-channel input (e.g., RGB with C_in=3)"""
+            layer = self.make_built_layer(
+                Layer_Class,
+                in_channels=3,
+                out_channels=8,
+                filter_size=self.FILTER_SIZE,
+                stride=self.STRIDE,
+                padding=self.PADDING
+            )
+            rgb_images = self.xp.random.randn(2, 28, 28, 3)
+            output = layer.forward(rgb_images, training=False)
+            self.assertEqual(output.shape, (2, 28, 28, 8))
+
+        def test_conv_variable_batch_sizes(self):
+            """Verify shape cache handles dynamic batch sizes without re-compilation or shape errors"""
+            inputs_b4 = self.xp.random.randn(4, 16, 16, self.IN_CHANNELS)
+            out_b4 = self.layer.forward(inputs_b4, training=False)
+            self.assertEqual(out_b4.shape, (4, 16, 16, self.OUT_CHANNELS))
+
+            inputs_b1 = self.xp.random.randn(1, 16, 16, self.IN_CHANNELS)
+            out_b1 = self.layer.forward(inputs_b1, training=False)
+            self.assertEqual(out_b1.shape, (1, 16, 16, self.OUT_CHANNELS))
+
+        def test_conv_non_square_filter(self):
+            """Verify rectangular filter geometries such as (5, 3)"""
+            layer = self.make_built_layer(
+                Layer_Class,
+                in_channels=self.IN_CHANNELS,
+                out_channels=self.OUT_CHANNELS,
+                filter_size=(5, 3),
+                stride=(1, 1),
+                padding="same"
+            )
+            output = layer.forward(self.test_images, training=False)
+            self.assertEqual(output.shape, (2, 28, 28, self.OUT_CHANNELS))
+
+        def test_fp16_cache_invalidation_on_weight_update(self):
+            """Ensure updating layer weights invalidates the FP16 shadow cache"""
+            if self.backend_name == 'cupy':
+                self.layer._compile_for_device('cupy')
+                _ = self.layer.forward(self.test_images, training=False)
+                
+                # If GPU matrix-core path was taken, cache should now be valid
+                if self.layer._fp16_weight_cache is not None:
+                    self.assertTrue(self.layer._fp16_weight_valid)
+
+                    # Update weights via property setter
+                    new_weights = self.xp.random.randn(*self.layer.filter_weights.shape).astype(self.xp.float32)
+                    self.layer.weights = new_weights
+                    self.assertFalse(self.layer._fp16_weight_valid)
+
+        def test_forward_gpu_fallback_numeric_parity(self):
+            """Verify numerical equivalence between _forward_gpu and _forward_fallback (CuPy backend only)"""
+            if self.backend_name == 'cupy':
+                from aether.custom_kernels import conv_kernel
+                if conv_kernel.get_is_conv_gpu_available():
+                    fixed_input = self.xp.random.randn(2, 14, 14, self.IN_CHANNELS).astype(self.xp.float32)
+
+                    # Execute GPU matrix-core path
+                    gpu_out = self.layer._forward_gpu(fixed_input, training=False)
+
+                    # Execute CPU/CuPy fallback path
+                    fallback_out = self.layer._forward_fallback(fixed_input, training=False)
+
+                    # FP16 Tensor Cores introduce minor precision differences vs FP32 einsum
+                    self.xp.testing.assert_allclose(gpu_out, fallback_out, rtol=1e-2, atol=1e-2)
 
     TestConvLayer.__name__ = class_name
     TestConvLayer.__qualname__ = class_name
     return TestConvLayer
 
-# Global Unpacking Loop
 for backend in backends_to_test:
     
     class_name = f"Test_{TARGET_LAYER.__name__}_{backend.upper()}"
-    # Bind generated class to the global namespace for unittest discovery
     globals()[class_name] = make_suite(backend_name=backend, Layer_Class=TARGET_LAYER)

@@ -54,10 +54,9 @@ def make_suite(backend_name: str):
                                 critical_indices.append(n_bad)
 
                             test_vec = self.xp.array(critical_indices, dtype=self.xp.uint64)
-                            if self.backend_name == 'cupy':
-                                test_vec = self.xp.unique(test_vec)
-                            else:
-                                test_vec = np.unique(test_vec)
+                            test_vec_cpu = cp.asnumpy(test_vec) if self.backend_name == 'cupy' else test_vec
+                            test_vec_cpu = np.unique(test_vec_cpu)
+                            test_vec = self.xp.array(test_vec_cpu, dtype=self.xp.uint64)
 
                             # FIXED: shift_amount is now a Python int
                             approx = (test_vec * u_scale) >> shift_amount
