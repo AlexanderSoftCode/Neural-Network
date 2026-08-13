@@ -1,4 +1,4 @@
-data/
+/data/
 *.npz
 **__pycache__/
 *.egg-info/
