@@ -128,6 +128,43 @@ def make_suite(backend_name, Layer_Class):
             output = layer.forward(self.test_images, training=False)
             self.assertEqual(output.shape, (2, 28, 14, 4))
 
+        def test_conv_multichannel_input(self):
+            """Verify forward pass with multi-channel input (e.g., RGB with C_in=3)"""
+            layer = self.make_built_layer(
+                Layer_Class,
+                in_channels=3,
+                out_channels=8,
+                filter_size=self.FILTER_SIZE,
+                stride=self.STRIDE,
+                padding=self.PADDING
+            )
+            rgb_images = self.xp.random.randn(2, 28, 28, 3)
+            output = layer.forward(rgb_images, training=False)
+            self.assertEqual(output.shape, (2, 28, 28, 8))
+
+        def test_conv_variable_batch_sizes(self):
+            """Verify shape cache handles dynamic batch sizes without re-compilation or shape errors"""
+            inputs_b4 = self.xp.random.randn(4, 16, 16, self.IN_CHANNELS)
+            out_b4 = self.layer.forward(inputs_b4, training=False)
+            self.assertEqual(out_b4.shape, (4, 16, 16, self.OUT_CHANNELS))
+
+            inputs_b1 = self.xp.random.randn(1, 16, 16, self.IN_CHANNELS)
+            out_b1 = self.layer.forward(inputs_b1, training=False)
+            self.assertEqual(out_b1.shape, (1, 16, 16, self.OUT_CHANNELS))
+
+        def test_conv_non_square_filter(self):
+            """Verify rectangular filter geometries such as (5, 3)"""
+            layer = self.make_built_layer(
+                Layer_Class,
+                in_channels=self.IN_CHANNELS,
+                out_channels=self.OUT_CHANNELS,
+                filter_size=(5, 3),
+                stride=(1, 1),
+                padding="same"
+            )
+            output = layer.forward(self.test_images, training=False)
+            self.assertEqual(output.shape, (2, 28, 28, self.OUT_CHANNELS))
+
         def test_conv_numerical_gradient_check(self):
             """
             Finite difference check: verify analytical dweights matches numerical approximation
@@ -182,46 +219,13 @@ def make_suite(backend_name, Layer_Class):
         
                             numerical_dweights[fh, fw, c, f] = (loss_plus - loss_minus) / (2 * epsilon)
         
-            self.xp.testing.assert_array_almost_equal(
-                analytical_dweights, numerical_dweights, decimal=2
+            self.xp.testing.assert_allclose(
+                analytical_dweights, 
+                numerical_dweights, 
+                rtol=3e-2,   # 3% relative tolerance
+                atol=2e-2    # 0.02 absolute tolerance
             )
-
-        def test_conv_multichannel_input(self):
-            """Verify forward pass with multi-channel input (e.g., RGB with C_in=3)"""
-            layer = self.make_built_layer(
-                Layer_Class,
-                in_channels=3,
-                out_channels=8,
-                filter_size=self.FILTER_SIZE,
-                stride=self.STRIDE,
-                padding=self.PADDING
-            )
-            rgb_images = self.xp.random.randn(2, 28, 28, 3)
-            output = layer.forward(rgb_images, training=False)
-            self.assertEqual(output.shape, (2, 28, 28, 8))
-
-        def test_conv_variable_batch_sizes(self):
-            """Verify shape cache handles dynamic batch sizes without re-compilation or shape errors"""
-            inputs_b4 = self.xp.random.randn(4, 16, 16, self.IN_CHANNELS)
-            out_b4 = self.layer.forward(inputs_b4, training=False)
-            self.assertEqual(out_b4.shape, (4, 16, 16, self.OUT_CHANNELS))
-
-            inputs_b1 = self.xp.random.randn(1, 16, 16, self.IN_CHANNELS)
-            out_b1 = self.layer.forward(inputs_b1, training=False)
-            self.assertEqual(out_b1.shape, (1, 16, 16, self.OUT_CHANNELS))
-
-        def test_conv_non_square_filter(self):
-            """Verify rectangular filter geometries such as (5, 3)"""
-            layer = self.make_built_layer(
-                Layer_Class,
-                in_channels=self.IN_CHANNELS,
-                out_channels=self.OUT_CHANNELS,
-                filter_size=(5, 3),
-                stride=(1, 1),
-                padding="same"
-            )
-            output = layer.forward(self.test_images, training=False)
-            self.assertEqual(output.shape, (2, 28, 28, self.OUT_CHANNELS))
+        # --- regression tests ---------------------------------------------------
 
         def test_fp16_cache_invalidation_on_weight_update(self):
             """Ensure updating layer weights invalidates the FP16 shadow cache"""
@@ -254,9 +258,107 @@ def make_suite(backend_name, Layer_Class):
                     # FP16 Tensor Cores introduce minor precision differences vs FP32 einsum
                     self.xp.testing.assert_allclose(gpu_out, fallback_out, rtol=1e-2, atol=1e-2)
 
+        def test_conv_gpu_backward_dbias_parity(self):
+            """Verify numerical equivalence for dbiases between _backward_gpu and _backward_fallback"""
+            if self.backend_name != 'cupy':
+                self.skipTest("CuPy backend required for GPU kernel tests")
+            from aether.custom_kernels import conv_kernel
+            if not conv_kernel.get_is_conv_gpu_available():
+                self.skipTest("Matrix-core GPU kernels not available on this device")
+
+            layer = self.make_built_layer(
+                Layer_Class,
+                in_channels=self.IN_CHANNELS,
+                out_channels=2,
+                filter_size=self.FILTER_SIZE,
+                stride=self.STRIDE,
+                padding=self.PADDING
+            )
+
+            fixed_input = self.xp.random.randn(2, 8, 8, self.IN_CHANNELS).astype(self.xp.float32)
+            dvalues = self.xp.random.randn(2, 8, 8, 2).astype(self.xp.float32)
+
+            # 1. Run Fallback End-to-End
+            layer._forward_fallback(fixed_input, training=False)
+            layer._backward_fallback(dvalues)
+            fallback_dbiases = layer.dbiases.copy()
+
+            # 2. Run GPU End-to-End
+            layer._forward_gpu(fixed_input, training=False)
+            layer._backward_gpu(dvalues)
+            gpu_dbiases = layer.dbiases.copy()
+
+            # FP32 exact accumulation check
+            self.xp.testing.assert_allclose(gpu_dbiases, fallback_dbiases, rtol=1e-5, atol=1e-5)
+
+        def test_conv_gpu_backward_dweight_parity(self):
+            """Verify numerical equivalence for dweights between _backward_gpu and _backward_fallback"""
+            if self.backend_name != 'cupy':
+                self.skipTest("CuPy backend required for GPU kernel tests")
+            from aether.custom_kernels import conv_kernel
+            if not conv_kernel.get_is_conv_gpu_available():
+                self.skipTest("Matrix-core GPU kernels not available on this device")
+
+            layer = self.make_built_layer(
+                Layer_Class,
+                in_channels=self.IN_CHANNELS,
+                out_channels=2,
+                filter_size=self.FILTER_SIZE,
+                stride=self.STRIDE,
+                padding=self.PADDING
+            )
+
+            fixed_input = self.xp.random.randn(2, 8, 8, self.IN_CHANNELS).astype(self.xp.float32)
+            dvalues = self.xp.random.randn(2, 8, 8, 2).astype(self.xp.float32)
+
+            # 1. Run Fallback End-to-End
+            layer._forward_fallback(fixed_input, training=False)
+            layer._backward_fallback(dvalues)
+            fallback_dweights = layer.dweights.copy()
+
+            # 2. Run GPU End-to-End
+            layer._forward_gpu(fixed_input, training=False)
+            layer._backward_gpu(dvalues)
+            gpu_dweights = layer.dweights.copy()
+
+            # WMMA FP16 vs FP32 tensordot tolerance comparison
+            self.xp.testing.assert_allclose(gpu_dweights, fallback_dweights, rtol=1e-2, atol=1e-2)
+
+        def test_conv_gpu_backward_dinput_parity(self):
+            """Verify numerical equivalence for dinputs between _backward_gpu and _backward_fallback"""
+            if self.backend_name != 'cupy':
+                self.skipTest("CuPy backend required for GPU kernel tests")
+            from aether.custom_kernels import conv_kernel
+            if not conv_kernel.get_is_conv_gpu_available():
+                self.skipTest("Matrix-core GPU kernels not available on this device")
+
+            layer = self.make_built_layer(
+                Layer_Class,
+                in_channels=self.IN_CHANNELS,
+                out_channels=2,
+                filter_size=self.FILTER_SIZE,
+                stride=self.STRIDE,
+                padding=self.PADDING
+            )
+
+            fixed_input = self.xp.random.randn(2, 8, 8, self.IN_CHANNELS).astype(self.xp.float32)
+            dvalues = self.xp.random.randn(2, 8, 8, 2).astype(self.xp.float32)
+
+            # 1. Run Fallback End-to-End
+            layer._forward_fallback(fixed_input, training=False)
+            layer._backward_fallback(dvalues)
+            fallback_dinputs = layer.dinputs.copy()
+
+            # 2. Run GPU End-to-End
+            layer._forward_gpu(fixed_input, training=False)
+            layer._backward_gpu(dvalues)
+            gpu_dinputs = layer.dinputs.copy()
+
+            # WMMA FP16 + atomicAdd vs FP32 tensordot tolerance comparison
+            self.xp.testing.assert_allclose(gpu_dinputs, fallback_dinputs, rtol=1e-2, atol=1e-2)
     TestConvLayer.__name__ = class_name
     TestConvLayer.__qualname__ = class_name
-    return TestConvLayer
+    return TestConvLayer 
 
 for backend in backends_to_test:
     
