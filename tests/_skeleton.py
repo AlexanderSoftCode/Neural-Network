@@ -50,7 +50,13 @@ def make_suite(backend_name, Layer_Class):
             # Add the layer class, then add its respective arguments after
             self.layer = self.make_layer(
                 Layer_Class, filter_size=self.FILTER_SIZE,
-                stride=self.STRIDE, padding=self.PADDING,
+                stride=self.STRIDE, padding=self.PADDING
+            )
+            # This version calls the Layer_Class.built method then calls
+            # self.make_layer
+            self.layer2 = self.make_built_layer(
+                Layer_Class, filter_size=self.FILTER_SIZE,
+                stride=self.STRIDE, padding=self.PADDING
             )
             self.test_images = self.xp.random.randn(2, 28, 28, 1)
         

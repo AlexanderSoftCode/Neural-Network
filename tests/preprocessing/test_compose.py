@@ -1,0 +1,216 @@
+import numpy as np
+
+import aether.config as config
+from tests.base_case import AetherBaseTestCase
+from aether.preprocessing.transforms import Compose, ToTensor, StandardScaler, Rescale
+
+TARGET_CLASS = Compose
+
+backends_to_test = ['numpy']
+try:
+    import cupy as cp
+    backends_to_test.append('cupy')
+except (ImportError, Exception):
+    pass
+
+
+def make_suite(backend_name, Compose_Class):
+    class_name = f"Test_{Compose_Class.__name__}_{backend_name.upper()}"
+
+    class TestComposePipelineTransform(AetherBaseTestCase):
+        
+        def setUp(self):
+            self.backend_name = backend_name
+            config.set_backend(backend_name=self.backend_name)
+            self.xp = config.xp
+
+        def test_compose_single_array_totensor_and_scaler_pipeline(self):
+            """Verify end-to-end pipeline execution with a pre-fitted scaler."""
+            X_train_raw = np.random.randint(0, 256, size=(100, 32, 32, 3), dtype=np.uint8)
+
+            X_train_tensor = config.to_device(X_train_raw, target=self.backend_name).astype(self.xp.float32) / 255.0
+            scaler = StandardScaler().fit(X_train_tensor)
+
+            pipeline = Compose_Class(transforms=[
+                ToTensor(dtype='float32', target_device=self.backend_name),
+                scaler
+            ])
+
+            X_test_raw = np.random.randint(0, 256, size=(20, 32, 32, 3), dtype=np.uint8)
+            out_tensor = pipeline(X_test_raw)
+
+            self.assertIsInstance(out_tensor, self.xp.ndarray)
+            self.assertEqual(out_tensor.shape, (20, 32, 32, 3))
+            self.assertEqual(str(out_tensor.dtype), 'float32')
+
+        def test_compose_fit_with_unfitted_scaler(self):
+            """Verify Compose.fit propagates intermediate transformations and fits unfitted scalers."""
+            raw_train = np.array([[0, 128], [255, 255]], dtype=np.uint8)
+            raw_test = np.array([[128, 255]], dtype=np.uint8)
+
+            scaler = StandardScaler()
+            self.assertIsNone(scaler.mean, "Scaler should be unfitted initially")
+
+            pipeline = Compose_Class(transforms=[
+                ToTensor(dtype='float32', target_device=self.backend_name),
+                Rescale(factor=1.0 / 255.0),
+                scaler
+            ])
+
+            returned_pipeline = pipeline.fit(raw_train)
+            self.assertIs(returned_pipeline, pipeline)
+
+            self.assertIsNotNone(scaler.mean)
+            self.assertIsNotNone(scaler.std)
+
+            expected_mean = float(self.xp.mean(self.xp.array([[0.0, 128.0 / 255.0], [1.0, 1.0]], dtype=self.xp.float32)))
+            self.assertAlmostEqual(float(scaler.mean.item()), expected_mean, places=4)
+
+            train_out = pipeline(raw_train)
+            test_out = pipeline(raw_test)
+
+            self.assertIsInstance(train_out, self.xp.ndarray)
+            self.assertIsInstance(test_out, self.xp.ndarray)
+            self.assertAlmostEqual(float(self.xp.mean(train_out)), 0.0, places=4)
+
+        def test_compose_fit_transform_equivalence(self):
+            """Verify Compose.fit_transform(X) yields identical results to Compose.fit(X)(X)."""
+            raw_train = np.random.randint(0, 256, size=(50, 8), dtype=np.uint8)
+
+            pipeline_fit_transform = Compose_Class(transforms=[
+                ToTensor(dtype='float32', target_device=self.backend_name),
+                Rescale(factor=1.0 / 255.0),
+                StandardScaler()
+            ])
+            out_fit_transform = pipeline_fit_transform.fit_transform(raw_train)
+
+            pipeline_fit = Compose_Class(transforms=[
+                ToTensor(dtype='float32', target_device=self.backend_name),
+                Rescale(factor=1.0 / 255.0),
+                StandardScaler()
+            ])
+            pipeline_fit.fit(raw_train)
+            out_fit_call = pipeline_fit(raw_train)
+
+            self.assertTrue(self.xp.allclose(out_fit_transform, out_fit_call, atol=1e-5))
+            self.assertEqual(str(out_fit_transform.dtype), 'float32')
+
+        def test_compose_sequential_execution_order(self):
+            """Verify that Compose executes transforms sequentially in exact list order."""
+            execution_order = []
+
+            def step_one(x):
+                execution_order.append(1)
+                return x + 10
+
+            def step_two(x):
+                execution_order.append(2)
+                return x * 2
+
+            pipeline = Compose_Class(transforms=[step_one, step_two])
+            result = pipeline(5)
+
+            self.assertEqual(execution_order, [1, 2])
+            self.assertEqual(result, (5 + 10) * 2)
+
+        def test_compose_multiple_inputs_tuple_unpacking(self):
+            """Verify Compose correctly handles multiple positional inputs across transforms."""
+            X_raw = np.ones((10, 4), dtype=np.float64)
+            y_raw = np.zeros((10,), dtype=np.int64)
+
+            def double_both(X, y):
+                return X * 2, y + 1
+
+            pipeline = Compose_Class(transforms=[
+                ToTensor(dtype='float32', preserve_integers=True, target_device=self.backend_name),
+                double_both
+            ])
+
+            X_out, y_out = pipeline(X_raw, y_raw)
+
+            self.assertIsInstance(X_out, self.xp.ndarray)
+            self.assertIsInstance(y_out, self.xp.ndarray)
+            self.assertEqual(str(X_out.dtype), 'float32')
+            self.assertTrue(self.xp.issubdtype(y_out.dtype, self.xp.integer))
+            self.assertEqual(float(X_out[0, 0]), 2.0)
+            self.assertEqual(int(y_out[0]), 1)
+
+        def test_compose_empty_transforms_returns_input(self):
+            """Verify empty transform list returns input data untouched."""
+            pipeline = Compose_Class(transforms=[])
+            sample_data = self.xp.array([1, 2, 3])
+
+            out = pipeline(sample_data)
+            self.assertTrue(self.xp.array_equal(out, sample_data))
+
+        def test_compose_fit_empty_pipeline_returns_self(self):
+            """Verify calling .fit() and .fit_transform() on an empty pipeline does not error."""
+            pipeline = Compose_Class(transforms=[])
+            sample_data = self.xp.array([1.0, 2.0, 3.0])
+
+            fitted = pipeline.fit(sample_data)
+            self.assertIs(fitted, pipeline)
+
+            out = pipeline.fit_transform(sample_data)
+            self.assertTrue(self.xp.array_equal(out, sample_data))
+
+        def test_compose_single_input_with_rescale(self):
+            """Verify Compose handles ToTensor -> Rescale pipeline on sRGB image arrays."""
+            raw_images = np.full((10, 32, 32, 3), 255, dtype=np.uint8)
+
+            pipeline = Compose_Class(transforms=[
+                ToTensor(dtype='float32', target_device=self.backend_name),
+                Rescale(factor=1.0 / 255.0)
+            ])
+
+            res = pipeline(raw_images)
+
+            self.assertIsInstance(res, self.xp.ndarray)
+            self.assertEqual(str(res.dtype), 'float32')
+            self.assertTrue(self.xp.allclose(res, 1.0))
+
+        def test_compose_rescale_chained_with_scaler(self):
+            """Verify Compose correctly chains ToTensor -> Rescale -> pre-fitted StandardScaler."""
+            raw_images = np.array([[0, 128], [255, 255]], dtype=np.uint8)
+
+            scaled_data = raw_images.astype(np.float32) / 255.0
+            scaler = StandardScaler().fit(scaled_data)
+
+            pipeline = Compose_Class(transforms=[
+                ToTensor(dtype='float32', target_device=self.backend_name),
+                Rescale(factor=1.0 / 255.0),
+                scaler
+            ])
+
+            res = pipeline(raw_images)
+
+            self.assertIsInstance(res, self.xp.ndarray)
+            self.assertEqual(str(res.dtype), 'float32')
+            self.assertAlmostEqual(float(self.xp.mean(res)), 0.0, places=4)
+
+        def test_compose_multi_input_rescale_preserves_labels(self):
+            """Verify Rescale in a multi-input pipeline scales float features but ignores integer targets."""
+            X_raw = np.array([[0, 255], [127, 255]], dtype=np.uint8)
+            y_raw = np.array([0, 1], dtype=np.int64)
+
+            pipeline = Compose_Class(transforms=[
+                ToTensor(dtype='float32', preserve_integers=True, target_device=self.backend_name),
+                Rescale(factor=1.0 / 255.0)
+            ])
+
+            X_out, y_out = pipeline(X_raw, y_raw)
+
+            self.assertEqual(str(X_out.dtype), 'float32')
+            self.assertAlmostEqual(float(X_out[0, 1]), 1.0, places=5)
+            self.assertTrue(self.xp.issubdtype(y_out.dtype, self.xp.integer))
+            self.assertEqual(int(y_out[1]), 1)
+
+    TestComposePipelineTransform.__name__ = class_name
+    TestComposePipelineTransform.__qualname__ = class_name
+
+    return TestComposePipelineTransform
+
+
+for backend in backends_to_test:
+    class_name = f"Test_{TARGET_CLASS.__name__}_{backend.upper()}"
+    globals()[class_name] = make_suite(backend_name=backend, Compose_Class=TARGET_CLASS)

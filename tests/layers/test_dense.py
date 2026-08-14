@@ -19,14 +19,14 @@ except:
 def make_suite(backend_name, Layer_Class):    
 
     class_name = f"Test_{Layer_Class.__name__}_{backend_name.upper()}"
-    class TestDenseLayer(unittest.TestCase): 
+    class TestDenseLayer(AetherBaseTestCase): 
         def setUp(self):
             self.backend_name = backend_name
             set_backend(backend_name=self.backend_name)
             self.xp = config.xp
 
             self.xp.random.seed(42)
-            self.layer = Layer_Class(n_inputs=5, n_neurons=3)
+            self.layer = self.make_built_layer(Layer_Class, n_inputs=5, n_neurons=3)
             self.test_input = self.xp.random.randn(10, 5) 
 
         def test_forward_shape(self):
@@ -60,7 +60,7 @@ def make_suite(backend_name, Layer_Class):
         def test_dense_zero_input(self):
             "Given an input of all zeros, show an output of all zeros (plus biases)"
 
-            layer = Dense(n_inputs = 728, n_neurons = 20)
+            layer = self.make_built_layer(Dense, n_inputs = 728, n_neurons=20)
             
             zero_input = self.xp.zeros((1, 728))
 
@@ -78,7 +78,7 @@ def make_suite(backend_name, Layer_Class):
             f'(x) ≈ (f(x + h) - f(x - h)) / 2h
             """
             epsilon = 1e-2
-            layer = Dense(n_inputs=5, n_neurons=3)
+            layer = self.make_built_layer(Dense, n_inputs=5, n_neurons=3)
 
             fixed_input = self.xp.random.randn(4, 5)
             dvalues = self.xp.ones((4, 3))
