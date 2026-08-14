@@ -5,6 +5,7 @@ _PREPROCESSING_MODULES = {
     "ToTensor":       "aether.preprocessing.transforms",
     "StandardScaler": "aether.preprocessing.transforms",
     "Compose":        "aether.preprocessing.transforms",
+    "Rescale":        "aether.preprocessing.transforms"
 }
 
 install_lazy_attrs(globals(), _PREPROCESSING_MODULES)

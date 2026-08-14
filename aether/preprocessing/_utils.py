@@ -22,6 +22,8 @@ def validate_dtype(dtype):
     return dtype
 
 def is_dtype_like(val) -> bool:
+    if val is None:
+        return True
     if isinstance(val, (tuple, list)):
         return all(is_dtype_like(item) for item in val)
     if isinstance(val, (type, np.dtype, str)):
@@ -43,10 +45,16 @@ def parse_inputs(args, kw_dtype):
 def resolve_dtypes(raw_dtype, num_arrays):
     if raw_dtype is None:
         return [None] * num_arrays
-    dtypes = tuple(validate_dtype(d) for d in raw_dtype) if isinstance(raw_dtype, (tuple, list)) else (validate_dtype(raw_dtype),)
+    
+    is_tuple = isinstance(raw_dtype, (tuple, list))
+    dtypes = tuple(validate_dtype(d) for d in raw_dtype) if is_tuple else (validate_dtype(raw_dtype),)
+
     if len(dtypes) > 1 and len(dtypes) != num_arrays:
         raise ValueError(f"Length of `dtype` tuple ({len(dtypes)}) must match number of arrays ({num_arrays}).")
-    return list(dtypes) if len(dtypes) > 1 else [dtypes[0]] * num_arrays
+
+    resolved = list(dtypes) if len(dtypes) > 1 else [dtypes[0]] * num_arrays
+    return resolved
+
 
 def convert_single_tensor(arr, target_dtype, target_device, preserve_integers):
     if arr is None:
@@ -58,7 +66,8 @@ def convert_single_tensor(arr, target_dtype, target_device, preserve_integers):
 
     if target_dtype is None or not hasattr(tensor, 'astype'):
         return tensor
-    if preserve_integers and tensor.dtype.kind in ('i', 'u'):
+
+    if preserve_integers and target_dtype is None and tensor.dtype.kind in ('i', 'u'):
         return tensor
 
     return tensor.astype(target_dtype, copy=False)

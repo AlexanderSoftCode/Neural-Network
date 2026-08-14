@@ -7,5 +7,6 @@ __all__ = [
     "to_tensor",
     "ToTensor",
     "StandardScaler",
+    "Rescale"
     "Compose"
 ]

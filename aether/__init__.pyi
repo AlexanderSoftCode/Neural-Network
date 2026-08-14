@@ -31,6 +31,7 @@ from aether.preprocessing.transforms import (
     to_tensor as to_tensor, 
     ToTensor as ToTensor, 
     StandardScaler as StandardScaler,
+    Rescale as Rescale,
     Compose as Compose
 )
 __all__ = [
@@ -62,5 +63,6 @@ __all__ = [
     "to_tensor",
     "ToTensor",
     "StandardScaler",
+    "Rescale",
     "Compose"
 ]
