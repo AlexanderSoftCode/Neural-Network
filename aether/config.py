@@ -19,7 +19,11 @@ except (ImportError, ModuleNotFoundError):
         return np
 
 xp = cp if HAS_CUPY else np
-DEFAULT_DTYPE = np.float32
+
+# Used to have bfloat16, but currently isn't stable for this framework
+COMPUTE_DTYPE = frozenset({'float16','float32', 'float64'})
+PARAM_DTYPE = 'float32'
+
 
 def enforce_cupy_env():
     """Loudly explodes only if a layer or user explicitly demands GPU execution."""
@@ -96,3 +100,63 @@ def build_kernel(factory, name=None):
     except Exception as e:
         warnings.warn(f"[aether] build_kernel: '{name or getattr(factory, '__name__', '?')}' failed to compile: {e}")
         return None
+
+class DTypePolicy():
+
+    def __init__ (self, compute_dtype: str | None = None) -> None:
+
+        if compute_dtype is not None and not isinstance(compute_dtype, str):
+            raise TypeError(
+                f"compute_dtype must be a str or None, but got {type(compute_dtype).__name__!r}."
+            )
+                            
+        if compute_dtype is not None and compute_dtype not in COMPUTE_DTYPE:
+            raise ValueError(f"dtype {compute_dtype} not in {COMPUTE_DTYPE}")
+
+        if compute_dtype == 'bfloat16' and xp is np:
+            raise RuntimeError(f"dtype {compute_dtype} is not supported in NumPy. Please use another value")
+
+        if compute_dtype == 'float16' and xp is np:
+            warnings.warn(
+                "NumPy float16 is emulated, consider float32 for CPU work.",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        self.compute_dtype_name = compute_dtype
+        self.param_dtype = np.dtype(PARAM_DTYPE)
+
+    def cast_to_compute(self, *tensors):
+        """
+        Casts incoming tensors to compute precision.
+        Returns a single tensor if one argument is passed, or a tuple if multiple arguments are passed.
+        """
+        if not tensors:
+            return ()
+
+        if self.compute_dtype_name is None:
+            return tensors[0] if len(tensors) == 1 else tensors
+
+        casted = [
+            t.astype(get_array_module(t).dtype(self.compute_dtype_name), copy=False)
+            if t is not None else None
+            for t in tensors
+        ]
+
+        return casted[0] if len(casted) == 1 else tuple(casted)
+
+    def cast_to_param(self, *tensors):
+        """
+        Casts gradients/tensors back to master parameter precision.
+        Returns a single tensor if one argument is passed, or a tuple if multiple arguments are passed.
+        """
+        if not tensors:
+            return ()
+
+        casted = [
+            t.astype(get_array_module(t).dtype(self.param_dtype), copy=False)
+            if t is not None else None
+            for t in tensors
+        ]
+
+        return casted[0] if len(casted) == 1 else tuple(casted)

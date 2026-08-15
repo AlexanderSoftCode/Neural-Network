@@ -65,9 +65,13 @@ class LeakyReLU(Layer):
         return self.dinputs
 
 class SoftMax(Layer):
-
-    def forward(self, inputs, training):
+    _precision_exempt = True 
+    def forward(self, inputs, training=False):
         xp = config.get_array_module(inputs)
+
+        if inputs.dtype != xp.float32:
+            inputs = inputs.astype(xp.float32, copy=False)
+
         exp_values = xp.exp(inputs - xp.max(inputs, axis=1, keepdims = True)) #e**(inputs - max(inputs by row))
         probabilities = exp_values / xp.sum(exp_values, axis=1, keepdims = True) #e**k / sum(e**k) 
         self.output = probabilities
@@ -77,6 +81,10 @@ class SoftMax(Layer):
     # A vectorized pass of the SoftMax backwards pass
     def backward(self, dvalues): 
         xp = config.get_array_module(dvalues)
+
+        if dvalues.dtype != xp.float32:
+            dvalues = dvalues.astype(xp.float32, copy=False)
+            
         sum_dvalues_output = xp.sum(dvalues * self.output, axis = -1, keepdims=True)
         self.dinputs = self.output * (dvalues - sum_dvalues_output)
 
