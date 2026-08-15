@@ -18,11 +18,28 @@ class AetherBaseTestCase(unittest.TestCase):
 
     def __init_subclass__(cls, *args, **kwargs):
         super().__init_subclass__(*args, **kwargs)
-        cls.__test__ = True
+        
+        if cls.__name__ == 'AetherBaseLayerTestCase':
+            cls.__test__ = False
+        else:
+            cls.__test__ = True
 
     def shortDescription(self):
         """Docstrings are ommitted when running verbose -v unit tests"""
         return None
+    def tearDown(self):
+        """Reset tracking state to system NumPy default safely between tests."""
+        if config.HAS_CUPY:
+            cp.cuda.Stream.null.synchronize()
+            cp.get_default_memory_pool().free_all_blocks()
+            cp.get_default_pinned_memory_pool().free_all_blocks()
+        set_backend(backend_name='numpy')
+
+
+class AetherBaseLayerTestCase(AetherBaseTestCase):
+    """Base class for layers/activations/loss modules"""
+    __test__ = False 
+
     def make_layer(self, layer_cls, **kwargs):
         """Construct a layer and, if it supports device compilation,
         bind it to the currently active backend.
@@ -39,13 +56,15 @@ class AetherBaseTestCase(unittest.TestCase):
         layer = self.make_layer(layer_cls, **kwargs)
         layer.build()
         return layer
-    def tearDown(self):
-        """Reset tracking state to system NumPy default safely between tests."""
-        if config.HAS_CUPY:
-            cp.cuda.Stream.null.synchronize()
-            cp.get_default_memory_pool().free_all_blocks()
-            cp.get_default_pinned_memory_pool().free_all_blocks()
-        set_backend(backend_name='numpy')
+
+    def set_precision(self, layer, compute_dtype):
+        """Helper mirroring Model.set_precision behavior for an individual layer."""
+        policy = config.DTypePolicy(compute_dtype=compute_dtype)
+        if hasattr(layer, "_apply_precision") and not getattr(
+            layer, "_precision_exempt", False
+        ):
+            layer._apply_precision(policy)
+        return policy
 
     def test_backend_pointer_swap(self):
         """Verify the layer/test environment successfully routes to the correct backend execution hooks."""

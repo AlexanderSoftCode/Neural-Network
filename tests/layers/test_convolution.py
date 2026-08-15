@@ -1,5 +1,5 @@
 import aether.config as config
-from tests.base_case import AetherBaseTestCase
+from tests.base_case import AetherBaseLayerTestCase
 
 from aether.layers.conv import Conv
 TARGET_LAYER = Conv
@@ -16,7 +16,7 @@ except (ImportError, ModuleNotFoundError):
 def make_suite(backend_name, Layer_Class):
 
     class_name = f"Test_{TARGET_LAYER.__name__}_{backend_name.upper()}"
-    class TestConvLayer(AetherBaseTestCase):
+    class TestConvLayer(AetherBaseLayerTestCase):
         IN_CHANNELS=1
         OUT_CHANNELS=4
         FILTER_SIZE=(3,3)

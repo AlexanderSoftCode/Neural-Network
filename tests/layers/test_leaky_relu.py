@@ -1,5 +1,5 @@
 import aether.config as config
-from tests.base_case import AetherBaseTestCase
+from tests.base_case import AetherBaseLayerTestCase
 
 from aether.layers.activations import LeakyReLU
 TARGET_LAYER = LeakyReLU
@@ -15,7 +15,7 @@ except (ImportError, Exception):
 def make_suite(backend_name, Layer_Class):
 
     class_name = f"Test_{TARGET_LAYER.__name__}_{backend_name.upper()}"
-    class TestLeakyReLU(AetherBaseTestCase):
+    class TestLeakyReLU(AetherBaseLayerTestCase):
         ALPHA = 0.1
         def setUp(self):
             self.backend_name = backend_name

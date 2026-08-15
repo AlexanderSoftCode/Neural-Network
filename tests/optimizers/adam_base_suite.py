@@ -2,7 +2,7 @@ import gc
 import weakref
 
 import aether.config as config
-from tests.base_case import AetherBaseTestCase
+from tests.base_case import AetherBaseLayerTestCase
 from aether.layers.linear import Dense
 from aether.layers.conv import Conv
 backends_to_test = ['numpy']
@@ -14,7 +14,7 @@ except (ImportError, Exception):
 
 
 def make_suite(backend_name, Optimizer_Class):
-    class TestOptimizerAdam(AetherBaseTestCase):
+    class TestOptimizerAdam(AetherBaseLayerTestCase):
         LR = 0.001
         DECAY = 0.0
         EPSILON = 1e-7

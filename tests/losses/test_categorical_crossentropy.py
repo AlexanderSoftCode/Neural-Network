@@ -1,5 +1,5 @@
 import aether.config as config
-from tests.base_case import AetherBaseTestCase
+from tests.base_case import AetherBaseLayerTestCase
 
 from aether.losses.categorical_crossentropy import CategoricalCrossEntropy
 TARGET_LAYER = CategoricalCrossEntropy
@@ -16,7 +16,7 @@ def make_suite(backend_name, Layer_Class):
 
     class_name = f"Test_{Layer_Class.__name__}_{backend_name.upper()}"
 
-    class TestLossCCE(AetherBaseTestCase):
+    class TestLossCCE(AetherBaseLayerTestCase):
         def setUp(self):
             config.set_backend(backend_name=backend_name)
             self.xp = config.xp

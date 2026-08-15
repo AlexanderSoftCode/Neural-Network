@@ -1,6 +1,6 @@
 import numpy as np
 import aether.config as config
-from tests.base_case import AetherBaseTestCase
+from tests.base_case import AetherBaseLayerTestCase
 
 from aether.layers.pooling import AvgPool2d
 TARGET_LAYER = AvgPool2d
@@ -14,7 +14,7 @@ except (ImportError, Exception):
     pass  
 def make_suite(backend_name, Layer_Class):
     class_name = f"Test_{Layer_Class.__name__}_{backend_name.upper()}"
-    class TestPooling(AetherBaseTestCase):
+    class TestPooling(AetherBaseLayerTestCase):
         FILTER_SIZE = (2, 2)
         STRIDE = (2, 2)
         PADDING = 'valid'        

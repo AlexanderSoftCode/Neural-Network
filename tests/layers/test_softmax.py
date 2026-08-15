@@ -1,5 +1,5 @@
 import aether.config as config
-from tests.base_case import AetherBaseTestCase
+from tests.base_case import AetherBaseLayerTestCase
 
 from aether.layers.activations import SoftMax
 TARGET_LAYER = SoftMax
@@ -14,7 +14,7 @@ except (ImportError, Exception):
 def make_suite(backend_name, Layer_Class):
     class_name = f"Test_{Layer_Class.__name__}_{backend_name.upper()}"
 
-    class TestSoftMax(AetherBaseTestCase):
+    class TestSoftMax(AetherBaseLayerTestCase):
         def setUp(self):
 
             self.backend_name = backend_name
@@ -122,6 +122,19 @@ def make_suite(backend_name, Layer_Class):
                 err_msg="Analytical backpropagation pass does not match the limit definition approximation!"
             )
 
+        def test_if_softmax_exempt_from_half_precision_float_flag(self):
+
+            self.layer._precision_exempt = True #set true by default
+
+            raw_inputs = self.xp.array([
+                [1.0, 2.0, 3.0, 4.0],
+                [-10.0, 0.0, 10.0, 5.0]
+            ], dtype=self.xp.float16)
+
+            output_float32 = self.layer.forward(raw_inputs, True)
+
+            self.assertEqual(output_float32.dtype, self.xp.float32)
+            
     TestSoftMax.__name__ = class_name
     TestSoftMax.__qualname__ = class_name
     return TestSoftMax

@@ -1,6 +1,6 @@
 import numpy as np
 import aether.config as config
-from tests.base_case import AetherBaseTestCase
+from tests.base_case import AetherBaseLayerTestCase
 
 from aether.layers.pooling import MaxPool2d
 TARGET_LAYER = MaxPool2d
@@ -15,7 +15,7 @@ except (ImportError, Exception):
 
 def make_suite(backend_name, Layer_Class):
     class_name = f"Test_{Layer_Class.__name__}_{backend_name.upper()}"
-    class TestMaxPool2d(AetherBaseTestCase):
+    class TestMaxPool2d(AetherBaseLayerTestCase):
         FILTER_SIZE = (2, 2)
         STRIDE = (2, 2)
         PADDING = 'valid'

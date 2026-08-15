@@ -4,7 +4,7 @@ from aether.losses.categorical_crossentropy import (
     SoftmaxCategoricalCrossEntropy
 )
 from aether.layers.activations import SoftMax
-from tests.base_case import AetherBaseTestCase
+from tests.base_case import AetherBaseLayerTestCase
 TARGET_LAYER = SoftmaxCategoricalCrossEntropy
 backends_to_test = ['numpy']
 try: 
@@ -16,7 +16,7 @@ except (ImportError, ModuleNotFoundError):
 def make_suite(backend_name, Layer_Class):
 
     class_name = f"Test{Layer_Class.__name__}_{backend_name.upper()}"
-    class TestActivationSoftmaxLossCCE(AetherBaseTestCase):
+    class TestActivationSoftmaxLossCCE(AetherBaseLayerTestCase):
         LABEL_SMOOTHING = 0.1 
         def setUp(self):
             self.backend_name = backend_name

@@ -1,5 +1,5 @@
 import aether.config as config 
-from tests.base_case import AetherBaseTestCase
+from tests.base_case import AetherBaseLayerTestCase
 from aether.layers.dropout import Dropout
 
 TARGET_LAYER = Dropout
@@ -13,7 +13,7 @@ except (ImportError, ModuleNotFoundError):
 
 def make_suite(backend_name, Layer_Class):
     class_name = f"Test_{Layer_Class.__name__}_{backend_name.upper()}"
-    class TestDropout(AetherBaseTestCase):
+    class TestDropout(AetherBaseLayerTestCase):
         DEFAULT_RATE = 0.5
         FIXED_SEED = 12345
         def setUp(self):

@@ -1,6 +1,6 @@
 import numpy as np
 import aether.config as config
-from tests.base_case import AetherBaseTestCase
+from tests.base_case import AetherBaseLayerTestCase
 
 from aether.layers.pooling import GlobalAvgPool
 TARGET_LAYER = GlobalAvgPool
@@ -15,7 +15,7 @@ except (ImportError, Exception):
 def make_suite(backend_name, Layer_Class):
     class_name = f"Test_{Layer_Class.__name__}_{backend_name.upper()}"
 
-    class TestGlobalAvgPool(AetherBaseTestCase):
+    class TestGlobalAvgPool(AetherBaseLayerTestCase):
         S, H, W, C = 2, 28, 28, 3
         def setUp(self):
             self.backend_name = backend_name
