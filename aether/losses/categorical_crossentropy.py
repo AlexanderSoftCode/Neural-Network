@@ -4,14 +4,31 @@ import aether.config as config
 # for the import below to be called lazily, however for best 
 # compatability this project would not use Python 3.15 for this issue
 from aether.layers.activations import SoftMax
-class Loss: 
+import aether.custom_kernels.loss_kernel as gpu_loss
+
+def _to_sparse_labels(xp, y_true):
+    """Canonicalize labels to sparse class-index form (S,).
+    """
+    return y_true if y_true.ndim == 1 else xp.argmax(y_true, axis=1)
+
+
+def _cce_per_sample_loss(xp, probs_clip, y_true_sparse, n_classes, label_smoothing, training):
+    """Per-sample CCE loss via direct gather"""
+    samples = len(probs_clip)
+    sample_idx = xp.arange(samples)
+    target_probs = probs_clip[sample_idx, y_true_sparse]
+
+    if label_smoothing > 0 and training:
+        sum_log = xp.sum(xp.log(probs_clip), axis=1)
+        return -(1.0 - label_smoothing) * xp.log(target_probs) - (label_smoothing / n_classes) * sum_log
+
+    return -xp.log(target_probs)
+
+
+class Loss:
     def __init__(self):
         self.new_pass()
 
-    def get_fused_loss(self, last_layer):
-        """Returns a fused activation+loss object if supported, else None"""
-        return None
-    
     def remember_trainable_layers(self, trainable_layers):
         self.trainable_layers = trainable_layers
 
@@ -41,8 +58,8 @@ class Loss:
         self.accumulated_count = 0
 
     def regularization_loss(self):
-        regularization_loss = 0             #if we don't do this, we risk overfitting.
-                                            #We will have to denote partials for this too...
+        regularization_loss = 0             # if we don't do this, we risk overfitting.
+                                            # We will have to denote partials for this too...
         for layer in self.trainable_layers:        
             xp = config.get_array_module(layer.weights)
             if layer.weight_regularizer_l1 > 0:
@@ -59,89 +76,116 @@ class Loss:
                                         xp.sum(layer.biases * layer.biases) 
         return regularization_loss
 
-class CategoricalCrossEntropy(Loss): 
+
+class CategoricalCrossEntropy(Loss):
     def __init__(self, label_smoothing = 0.0):
         super().__init__()
         self.label_smoothing = label_smoothing 
 
     def forward(self, y_pred, y_true, training = True):
         xp = config.get_array_module(y_pred)
-        #num samples in batch
         n_classes = y_pred.shape[1]
-        #next lets clip before continuing
         y_pred_clip = xp.clip(y_pred, 1e-7, 1 - 1e-7) #.000001 -> .999999
+        y_true_sparse = _to_sparse_labels(xp, y_true)
 
-        if len(y_true.shape) == 1:                    #scale vector [0, 1, 2]
-            y_true = xp.eye(n_classes)[y_true]
-            
-        #apply label smoothing if used
-        if self.label_smoothing > 0 and training:
-            y_true = y_true * (1.0 - self.label_smoothing) + \
-                    self.label_smoothing / n_classes
-        
-        #standard CE loss
-        loss = -xp.sum(y_true * xp.log(y_pred_clip), axis = 1)
-        
-        return loss
-    
+        return _cce_per_sample_loss(xp, y_pred_clip, y_true_sparse, n_classes, self.label_smoothing, training)
+
     def backward(self, dvalues, y_true, training=True):
         xp = config.get_array_module(dvalues)
         samples = len(dvalues)
         n_classes = dvalues.shape[1]
 
-        #number of labels per sample
-        #if the labels are sparse turn them into one hot vector
-        if len(y_true.shape) == 1:
+        y_true_sparse = _to_sparse_labels(xp, y_true)
+        dvalues_clip = xp.clip(dvalues, 1e-7, 1 - 1e-7)
+        sample_idx = xp.arange(samples)
 
-            #create a lookup table of n_classesxnclasses
-            # with indexes y_true where y_true = 1xn 
-            y_true = xp.eye(n_classes)[y_true]
+        dinputs = xp.zeros_like(dvalues)
+        target_probs = dvalues_clip[sample_idx, y_true_sparse]
 
-        #apply label smoothing again to match foward pass
-        if self.label_smoothing > 0:
-            y_true = y_true * (1.0 - self.label_smoothing) + \
-                    self.label_smoothing / n_classes
-            
-        dvalues_clip = xp.clip(dvalues, 1e-7, 1 - 1e-7)    
-        #calculate CE gradient
-        self.dinputs = -y_true / dvalues_clip / samples 
+        if self.label_smoothing > 0 and training:
+            dinputs += -(self.label_smoothing / n_classes) / dvalues_clip / samples
+            dinputs[sample_idx, y_true_sparse] -= (1.0 - self.label_smoothing) / target_probs / samples
+        else:
+            dinputs[sample_idx, y_true_sparse] = -1.0 / target_probs / samples
+
+        self.dinputs = dinputs
+
 
 class SoftmaxCategoricalCrossEntropy(Loss):
     def __init__(self, label_smoothing = 0.0):
         self.activation = SoftMax()
-        self.loss = CategoricalCrossEntropy(label_smoothing)
         self.label_smoothing = label_smoothing
         super().__init__()
 
-    def get_fused_loss(self, last_layer):
+        self.backward = self._backward_fallback
 
-        if isinstance(last_layer, SoftMax):
-            return SoftmaxCategoricalCrossEntropy(label_smoothing=self.label_smoothing)
-        return None
-    
-    def new_pass(self):
-        super().new_pass()
-        self.loss.new_pass()
+    def _compile_for_device(self, device):
+        """Triggered by Model.to(device) to bind the fused elementwise
+        backward kernel or the fallback."""
+        if device == 'cupy' and gpu_loss.is_gpu_softmax_cce_backward_available():
+            self.backward = self._backward_gpu
+        else:
+            self.backward = self._backward_fallback
+
     #y_true is the vector of correct class indices, one per sample.
-    #dvalues is output of softmax layer shape(n_samples, n_classes)
+    #inputs is the raw logits, shape (n_samples, n_classes)
     def forward(self, inputs, y_true, training = True):
-        self.activation.forward(inputs, training=training)                 #call forward function of softmax
-        self.output = self.activation.output            #take the output as output of forward
-        return self.loss.calculate(self.output, y_true, training = training) #take the loss via the ouput of softmax versus true
-    
-    def backward(self, dvalues, y_true, training = True):
-        xp = config.get_array_module(dvalues)
-        samples = len(dvalues)                          #For the backward note the samples
-        n_classes = dvalues.shape[1]
-        
-        #if dataset is sparse, create one hot, 
-        #else if one hot already then don't convert
-        if len(y_true.shape) == 1:                      
-            y_true = xp.eye(n_classes, dtype = xp.float32)[y_true]
-        
-        if self.label_smoothing > 0 and training:
-            y_true = y_true * (1.0 - self.label_smoothing) \
-                            + (self.label_smoothing / n_classes)
+        xp = config.get_array_module(inputs)
 
-        #gradient = (p - y_smooth) where we normalize after 
-        self.dinputs = (dvalues - y_true) / samples
+        self.activation.forward(inputs, training=training)  # call forward function of softmax
+        self.output = self.activation.output                
+
+        n_classes = self.output.shape[1]
+        y_true_sparse = _to_sparse_labels(xp, y_true)
+        probs_clip = xp.clip(self.output, 1e-7, 1 - 1e-7)
+
+        # Per-sample array, NOT a reduced scalar -- Loss.calculate() means
+        # to call xp.mean()/xp.sum()/len() on this directly.
+        return _cce_per_sample_loss(xp, probs_clip, y_true_sparse, n_classes, self.label_smoothing, training)
+
+    def predictions(self, outputs):
+        """Mirrors the functionality of softmax predictions, we require this as we pop softmax in combined pass"""
+        xp = config.get_array_module(outputs)
+        return xp.argmax(outputs, axis = 1)
+
+    def _backward_fallback(self, dvalues, y_true, training = True):
+        xp = config.get_array_module(dvalues)
+        samples = len(dvalues)
+        n_classes = dvalues.shape[1]
+
+        y_true_sparse = _to_sparse_labels(xp, y_true)
+        sample_idx = xp.arange(samples)
+
+        # dinputs = (dvalues - y_true_smooth) / samples, built via copy +
+        # scatter instead of materializing y_true_smooth as a full (S, C)
+        # one-hot array.
+        dinputs = dvalues.copy()
+
+        if self.label_smoothing > 0 and training:
+            dinputs -= self.label_smoothing / n_classes
+            dinputs[sample_idx, y_true_sparse] -= (1.0 - self.label_smoothing)
+        else:
+            dinputs[sample_idx, y_true_sparse] -= 1.0
+
+        dinputs /= samples
+        self.dinputs = dinputs
+        return self.dinputs
+
+    def _backward_gpu(self, dvalues, y_true, training = True):
+        xp = config.get_array_module(dvalues)
+        samples = len(dvalues)
+        n_classes = dvalues.shape[1]
+
+        y_true_sparse = _to_sparse_labels(xp, y_true).astype(xp.int64, copy=False)
+        class_idx = xp.arange(n_classes, dtype=xp.int64).reshape(1, n_classes)
+        y_true_row = y_true_sparse.reshape(samples, 1)
+
+        apply_smoothing = self.label_smoothing > 0 and training
+        smooth_offset = np.float32(self.label_smoothing / n_classes if apply_smoothing else 0.0)
+        target_offset = np.float32(1.0 - self.label_smoothing if apply_smoothing else 1.0)
+        inv_samples = np.float32(1.0 / samples)
+
+        self.dinputs = gpu_loss.softmax_cce_backward(
+            dvalues, y_true_row, class_idx, smooth_offset, target_offset, inv_samples
+        )
+        return self.dinputs
