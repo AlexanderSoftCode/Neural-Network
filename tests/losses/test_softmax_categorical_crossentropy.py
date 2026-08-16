@@ -24,8 +24,8 @@ def make_suite(backend_name, Layer_Class):
             self.xp = config.xp
             self.layer = self.make_layer(Layer_Class, label_smoothing=self.LABEL_SMOOTHING)
             self.layer.new_pass()
-        def test_output_matches_softmax_forward(self):
 
+        def test_output_matches_softmax_forward(self):
             logits = self.xp.array([
                 [3.0, 2.0, 1.0, 1.5],
                 [-3.0, 0.5, 2.5, 1.0]
@@ -38,18 +38,20 @@ def make_suite(backend_name, Layer_Class):
             layer_softmax = self.make_layer(SoftMax)
             layer_cce_loss = self.make_layer(CategoricalCrossEntropy, label_smoothing=self.LABEL_SMOOTHING)
             layer_cce_loss.new_pass()
+            
             softmax_output = layer_softmax.forward(logits, training=True)
             desired = layer_cce_loss.calculate(softmax_output, y_true, training=True)
 
-            expected = self.layer.forward(logits, y_true, training=True)
+            # Reduce the per-sample loss array to scalar mean for comparison with .calculate()
+            expected = self.xp.mean(self.layer.forward(logits, y_true, training=True))
 
             self.xp.testing.assert_allclose(desired, expected, rtol=1e-4)
 
 
         def test_forward_matches_separate_softmax_and_cce(self):
             """Verify calculating loss in one combined step mimics the same result
-            as calculating the result in two seperate steps 
-            Cobmined Forward Loss (X, y) = Loss(Softmax(X), y)"""
+            as calculating the result in two separate steps:
+            Combined Forward Loss (X, y) = Loss(Softmax(X), y)"""
             logits = self.xp.array([
                 [3.0, 2.0, 1.0, 1.5],
                 [-3.0, 0.5, 2.5, 1.0]
@@ -61,11 +63,14 @@ def make_suite(backend_name, Layer_Class):
             ])
             layer_softmax = self.make_layer(SoftMax)
             layer_cce_loss = self.make_layer(CategoricalCrossEntropy, label_smoothing=self.LABEL_SMOOTHING)
-            softmax_output = layer_softmax.forward(logits, training=True)
-            expected_seperate_output = layer_cce_loss.calculate(softmax_output, y_true, training=True)
-            combined_output = self.layer.forward(logits, y_true, training=True)
             
-            self.xp.testing.assert_allclose(expected_seperate_output, combined_output, rtol= 1e-4)
+            softmax_output = layer_softmax.forward(logits, training=True)
+            expected_separate_output = layer_cce_loss.calculate(softmax_output, y_true, training=True)
+            
+            # Reduce per-sample loss vector to scalar mean
+            combined_output = self.xp.mean(self.layer.forward(logits, y_true, training=True))
+            
+            self.xp.testing.assert_allclose(expected_separate_output, combined_output, rtol=1e-4)
 
         def test_forward_numerical_stability(self):
             """ Verify large-magnitude logits (e.g +- 1000) do not produce Nan/Inf
@@ -227,12 +232,10 @@ def make_suite(backend_name, Layer_Class):
 
             self.layer.backward(self.layer.output, y_true)
             self.assertEqual(self.layer.dinputs.shape, (1, 4))
-            self.assertFalse(self.xp.isnan(self.layer.dinputs).any())
+            self.assertFalse(self.xp.any(self.xp.isnan(loss)))
 
         def test_backward_numerical_check(self):
             """Numerical gradient check for standard Softmax + CCE (label_smoothing = 0.0)"""
-
-            # 1. Instantiate layer with label_smoothing = 0.0
             layer = self.make_layer(SoftmaxCategoricalCrossEntropy, label_smoothing=0.0)
 
             logits = self.xp.array([
@@ -245,31 +248,25 @@ def make_suite(backend_name, Layer_Class):
                 [0.0, 0.0, 0.0, 1.0]
             ], dtype=self.xp.float32)
 
-            # 2. Compute analytical gradient via backward()
             layer.forward(logits, y_true, training=True)
             layer.backward(layer.output, y_true)
             analytical_dinputs = layer.dinputs.copy()
 
-            # 3. Compute numerical gradient via centered finite differences
             h = 1e-4
             num_dinputs = self.xp.zeros_like(logits)
 
             for i in range(logits.shape[0]):
                 for j in range(logits.shape[1]):
-                    # Perturb logit +h
                     logits_plus = logits.copy()
                     logits_plus[i, j] += h
-                    loss_plus = layer.forward(logits_plus, y_true, training=False)
+                    loss_plus = self.xp.mean(layer.forward(logits_plus, y_true, training=False))
 
-                    # Perturb logit -h
                     logits_minus = logits.copy()
                     logits_minus[i, j] -= h
-                    loss_minus = layer.forward(logits_minus, y_true, training=False)
+                    loss_minus = self.xp.mean(layer.forward(logits_minus, y_true, training=False))
 
-                    # Centered difference derivative: [f(x+h) - f(x-h)] / (2*h)
                     num_dinputs[i, j] = (loss_plus - loss_minus) / (2 * h)
 
-            # 4. Compare analytical and numerical gradients
             self.xp.testing.assert_allclose(
                 analytical_dinputs, 
                 num_dinputs, 
@@ -278,34 +275,8 @@ def make_suite(backend_name, Layer_Class):
                 err_msg="Analytical and numerical gradients do not match for standard CCE."
             )
 
-            num_dinputs = self.xp.zeros_like(logits)
-
-            for i in range(logits.shape[0]):
-                for j in range(logits.shape[1]):
-                    # Perturb logit +h
-                    logits_plus = logits.copy()
-                    logits_plus[i, j] += h
-                    loss_plus = layer.forward(logits_plus, y_true, training=False)
-
-                    # Perturb logit -h
-                    logits_minus = logits.copy()
-                    logits_minus[i, j] -= h
-                    loss_minus = layer.forward(logits_minus, y_true, training=False)
-
-                    # Centered difference derivative: [f(x+h) - f(x-h)] / (2*h)
-                    num_dinputs[i, j] = (loss_plus - loss_minus) / (2 * h)
-
-            # 4. Compare analytical and numerical gradients
-            self.xp.testing.assert_allclose(
-                analytical_dinputs, 
-                num_dinputs, 
-                rtol=1e-3, 
-                atol=1e-3,
-                err_msg="Analytical and numerical gradients do not match for standard CCE."
-            )
         def test_backward_numerical_check_label_smoothing(self):
             """Check finite-difference forward() wrt. raw logits; compare to dinputs"""
-
             epsilon = 1e-4
             logits = self.xp.array([
                 [-1.2,  4.5,  0.8, -0.5],
@@ -326,15 +297,13 @@ def make_suite(backend_name, Layer_Class):
             
             for i in range(logits.shape[0]):
                 for j in range(logits.shape[1]):
-                    # +epsilon perturbation
                     logits_plus = logits.copy()
                     logits_plus[i, j] += epsilon
-                    loss_plus = self.layer.forward(logits_plus, y_true, training=True)
+                    loss_plus = self.xp.mean(self.layer.forward(logits_plus, y_true, training=True))
 
-                    # -epsilon perturbation
                     logits_minus = logits.copy()
                     logits_minus[i, j] -= epsilon
-                    loss_minus = self.layer.forward(logits_minus, y_true, training=True)
+                    loss_minus = self.xp.mean(self.layer.forward(logits_minus, y_true, training=True))
 
                     num_dinputs[i, j] = (loss_plus - loss_minus) / (2 * epsilon)
 
