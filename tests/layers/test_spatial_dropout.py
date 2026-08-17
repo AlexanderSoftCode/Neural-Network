@@ -76,12 +76,11 @@ def make_suite(backend_name, Layer_Class):
 
         def test_forward_drops_approximately_expected_fraction(self):
             rate = 0.4
-            layer = self.make_layer(Layer_Class, rate=rate)
+            # Pass the fixed seed directly so both CPU and GPU kernels generate deterministic masks
+            layer = self.make_layer(Layer_Class, rate=rate, seed=self.FIXED_SEED)
+            
             tensor_shape = (20, 10, 10, 100)
             inputs = self.xp.ones(shape=tensor_shape, dtype=self.xp.float32)
-
-            if not self.uses_gpu_kernel:
-                self.xp.random.seed(self.FIXED_SEED)
 
             output = layer.forward(inputs, training=True)
             dropped_fraction = float(self.xp.mean((output == 0).astype(self.xp.float32)))

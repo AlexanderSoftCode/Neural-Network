@@ -1,3 +1,4 @@
+import warnings
 import unittest
 import numpy as np
 from aether.config import set_backend
@@ -49,7 +50,7 @@ class AetherBaseLayerTestCase(AetherBaseTestCase):
         if hasattr(layer, '_compile_for_device'):
             layer._compile_for_device(self.backend_name)
         return layer
-    def make_built_layer(self, layer_cls, **kwargs):
+    def make_built_layer(self, layer_cls, seed: int | None = None, **kwargs):
         """Construct, bind to backend, and allocate array buffers for 
         parameterized layers (e.g., Dense, Conv2D).
         """
@@ -59,11 +60,19 @@ class AetherBaseLayerTestCase(AetherBaseTestCase):
 
     def set_precision(self, layer, compute_dtype):
         """Helper mirroring Model.set_precision behavior for an individual layer."""
-        policy = config.DTypePolicy(compute_dtype=compute_dtype)
-        if hasattr(layer, "_apply_precision") and not getattr(
-            layer, "_precision_exempt", False
-        ):
-            layer._apply_precision(policy)
+        # Since I find them annoying, we'll ignore the known emulation warnings after 
+        # test setup
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=r".*NumPy float16 is emulated.*",
+                category=UserWarning
+            )
+            policy = config.DTypePolicy(compute_dtype=compute_dtype)
+            if hasattr(layer, "_apply_precision") and not getattr(
+                layer, "_precision_exempt", False
+            ):
+                layer._apply_precision(policy)
         return policy
 
     def test_backend_pointer_swap(self):

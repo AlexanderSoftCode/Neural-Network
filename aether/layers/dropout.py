@@ -36,12 +36,18 @@ class DropoutRNGState:
         return int(seed_seq.generate_state(1, dtype=np.uint64)[0])
     
 class Dropout(Layer): 
-    def __init__(self, rate, seed=None): 
+    def __init__(self, rate, seed=None):
+        super().__init__(seed=seed)
         self.keep_rate = 1 - rate
 
-        self.rng = DropoutRNGState(base_seed=seed)
+        self.rng = DropoutRNGState(base_seed=self.seed)
         self.forward = self._forward_fallback
         self.backward = self._backward_fallback
+
+    def _set_seed(self, seed: int | None):
+        """Rebinds the layer seed and instantiates its specific RNG state."""
+        self.seed = seed
+        self.rng = DropoutRNGState(base_seed=seed)
 
     def _compile_for_device(self, device):
         """Triggered by Model.to(device) to map low-level hardware paths."""
@@ -91,14 +97,18 @@ class Dropout(Layer):
 class SpatialDropout(Layer): 
     
     def __init__(self, rate, seed=None):
-
+        super().__init__(seed=seed)
         self.rate = rate
         self.keep_rate = 1 - rate
 
-        self.rng = DropoutRNGState(base_seed=seed)
+        self.rng = DropoutRNGState(base_seed=self.seed)
 
         self.forward = self._forward_fallback
         self.backward = self._backward_fallback
+
+    def _set_seed(self, seed: int | None):
+        self.seed = seed
+        self.rng = DropoutRNGState(base_seed=seed)
 
     def _compile_for_device(self, device):
         """Triggered by Model.to(device) to map low-level hardware paths."""
