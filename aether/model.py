@@ -10,6 +10,7 @@ class Model():
         self.loss = None
         self.optimizer = None
         self.accuracy = None
+        self._seed = None
 
     def add(self, layer):
         if self.is_finalized:   
@@ -22,6 +23,12 @@ class Model():
             )
         self.layers.append(layer)
 
+    def manual_seed(self, seed: int):
+        if self.is_finalized:
+            raise RuntimeError("Cannot set a new seed after finalize() has been called.")
+        self._seed = int(seed)
+        return self
+    
     def configure(self, loss=None, optimizer=None, accuracy=None):
         """Configures the training components (loss, optimizer, metrics) for the model.
         Utilizes strict type checking for Loss and duck typing for optimizer/metric.
@@ -139,15 +146,19 @@ class Model():
         if not self.layers:
             raise RuntimeError("[aether] Cannot finalize an empty model. Please add layers via Model.add() first.")
 
-        for layer in self.layers:
+        for idx, layer in enumerate(self.layers):
             if hasattr(layer, "build") and callable(layer.build):
-                layer.build()
+                layer_seed = (self._seed + idx) if self._seed is not None else None
+                layer.build(seed=layer_seed)
+                
+            elif hasattr(layer, "_set_seed") and callable(layer._set_seed):
+                if getattr(layer, "seed", None) is None and self._seed is not None:
+                    layer._set_seed(self._seed)
                 
         self.trainable_layers = [
             layer for layer in self.layers
             if hasattr(layer, "weights") or hasattr(layer, "biases")
         ]
-
 
         if self.loss is not None:
             last_layer = self.layers[-1]
@@ -157,10 +168,8 @@ class Model():
                     "Do not add an explicit 'SoftMax' activation layer to the model."
                 )
 
-            if hasattr(self.loss, "remember_trainable_layers"):
-                self.loss.remember_trainable_layers(self.trainable_layers)
-            else:
-                self.loss.trainable_layers = self.trainable_layers
+            self.loss.remember_trainable_layers(self.trainable_layers)
+            
 
         if self.optimizer is not None:
             if not hasattr(self.optimizer, "step") or not hasattr(self.optimizer, "init_params"):
@@ -215,6 +224,7 @@ class Model():
             epochs (int): Number of full passes over the dataset.
             batch_size (int, optional): Mini-batch sample size. Defaults to None (full-batch).
             print_every (int): Step interval frequency for logging telemetry.
+            verbose (bool, optional): If True, prints training loss and accuracy metrics to stdout. Defaults to True. 
             validation_data (tuple, optional): (X_val, y_val) tuple for out-of-sample testing.
         """
         if not self.is_finalized:
@@ -363,9 +373,9 @@ class Model():
 
             if validation_data is not None:
                 X_val, y_val = validation_data
-                self.evaluate(X_val, y_val, batch_size=batch_size)
+                self.evaluate(X_val, y_val, batch_size=batch_size, verbose=verbose)
 
-    def evaluate(self, X_val, y_val, *, batch_size=None):
+    def evaluate(self, X_val, y_val, *, batch_size=None, verbose=True):
         """
         Evaluate the model's loss and metrics on validation/test data in inference mode.
 
@@ -373,7 +383,7 @@ class Model():
             X_val (ndarray): Evaluation input features (NumPy or CuPy ndarray).
             y_val (ndarray): Ground truth labels or targets.
             batch_size (int, optional): Mini-batch size. Defaults to None (full-batch).
-
+            verbose (bool, optional): If True, prints evaluation loss and accuracy metrics to stdout. Defaults to True.   
         Returns:
             tuple: (val_loss, val_acc) representing the computed validation metrics.
         """
@@ -420,7 +430,8 @@ class Model():
         val_loss = float(loss.calculate_accumulated(include_regularization=False)) if has_loss else 0.0
         val_acc = float(accuracy.calculate_accumulated()) if has_acc else 0.0
 
-        print(f"[Validation] loss: {val_loss:.4f} - acc: {val_acc:.4f}")
+        if verbose: 
+            print(f"[Validation] loss: {val_loss:.4f} - acc: {val_acc:.4f}")
 
         return val_loss, val_acc
 

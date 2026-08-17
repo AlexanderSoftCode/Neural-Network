@@ -2,7 +2,9 @@ import numpy as np
 import aether.config as config
 
 class Layer:
-    precision_policy = None 
+    precision_policy = None
+    def __init__(self, seed: int | None = None):
+        self.seed = seed
 
     def _apply_precision(self, policy):
         self.precision_policy = policy

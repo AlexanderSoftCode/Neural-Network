@@ -60,7 +60,6 @@ class Loss:
     def regularization_loss(self):
         regularization_loss = 0             # if we don't do this, we risk overfitting.
                                             # We will have to denote partials for this too...
-        
         for layer in getattr(self, "trainable_layers", []):        
             xp = config.get_array_module(layer.weights)
             
@@ -147,7 +146,6 @@ class SoftmaxCategoricalCrossEntropy(Loss):
         probs_fp32 = probs.astype(xp.float32, copy=False)
         n_classes = probs_fp32.shape[1]
         y_true_sparse = _to_sparse_labels(xp, y_true)
-        # [CHANGE]: Fixed bug where `self.output` was referenced instead of the local `probs_fp32`
         probs_clip = xp.clip(probs_fp32, 1e-7, 1 - 1e-7)
 
         # Per-sample array, NOT a reduced scalar -- Loss.calculate() means
