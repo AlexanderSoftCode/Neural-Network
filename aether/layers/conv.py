@@ -26,28 +26,33 @@ class Conv(Layer):
         self.weights = None
         self.biases = None
 
-    def build(self):
+    def build(self, seed: int | None = None):
         """
         Called once by Model.finalize(). config.xp is guaranteed to be
         correctly set if the user called model.to() beforehand.
         """
-        xp = config.xp
-        # We'll handle two scenarios, the first, where we pass in a (n, n, 1) or grayscale image, and a second
-        # where we'll handle a (n, n, 3) or RGB image. 
-        self.biases = xp.zeros(self.C_out, dtype = xp.float32)
-        n = self.filter_size[0] * self.filter_size[1] * self.C_in
-        std = xp.sqrt(xp.float32(2.0 / n))
-        
-        # We can now do He initaliztion, we'll sample values from a standard distribution N (0, 1) and multiply it by our
+        xp = config.xp 
+        # We'll do He initaliztion, we'll sample values from a standard distribution N (0, 1) and multiply it by our
         # std value to get N(0, std) 
-        self.filter_weights = (xp.random.randn(
-            self.filter_size[0],         # Filter height fH
-            self.filter_size[1],         # Filter width fW
-            self.C_in,              # Input channels C_in 
-            self.C_out              # Output channels C_out
-        ).astype(xp.float32)* std)
+        fan_in = self.filter_size[0] * self.filter_size[1] * self.C_in
+        std = xp.sqrt(xp.float32(2.0 / fan_in))
 
+        weight_shape = (
+                self.filter_size[0],         # Filter height fH
+                self.filter_size[1],         # Filter width fW
+                self.C_in,                   # Input channels C_in 
+                self.C_out                   # Output channels C_out
+            )
+        
+        if seed is not None:
+            rng = xp.random.RandomState(seed)
+            raw_weights = rng.randn(*weight_shape)
+        else:
+            raw_weights = xp.random.randn(*weight_shape)
+            
+        self.filter_weights = raw_weights.astype(xp.float32, copy=False) * std
         self.weights = self.filter_weights
+        self.biases = xp.zeros(self.C_out, dtype = xp.float32)
 
     def _compile_for_device(self, device):
         """Triggered by Model.to(device) to bind the matrix-core path when available."""

@@ -19,11 +19,11 @@ class Dense(Layer):
         self.precision_policy = config.DTypePolicy(compute_dtype = None)
 
         # Ephemeral forward cache for backward reuse
-        # I salso not used during inference
+        # Is also not used during inference
         self._inputs_compute = None
         self._weights_compute = None 
 
-    def build(self):
+    def build(self, seed: int | None = None):
         """
         Called once by Model.finalize(). config.xp is guaranteed to be
         correctly set if the user called model.to() beforehand.
@@ -31,7 +31,14 @@ class Dense(Layer):
         #With He initalization, our fan_in maintains proper variance through layers.
         xp = config.xp
         std = xp.sqrt(2.0 / self.n_inputs, dtype=xp.float32)
-        self.weights = xp.random.randn(self.n_inputs, self.n_neurons).astype(xp.float32, copy=False) * std
+
+        if seed is not None:
+            rng = xp.random.RandomState(seed)
+            raw_weights = rng.randn(self.n_inputs, self.n_neurons)
+        else:
+            raw_weights = xp.random.randn(self.n_inputs, self.n_neurons)
+
+        self.weights = raw_weights.astype(xp.float32, copy=False) * std
         self.biases = xp.zeros((1, self.n_neurons), dtype=xp.float32)
 
     def _apply_precision(self, policy):

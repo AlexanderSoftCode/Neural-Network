@@ -19,7 +19,7 @@ def make_suite(backend_name, Layer_Class):
 
     class_name = f"Test_{Layer_Class.__name__}_{backend_name.upper()}"
     class TestDenseLayer(AetherBaseLayerTestCase): 
-
+        SEED = 42
         N_INPUTS = 8
         N_NEURONS = 4
         BATCH_SIZE = 3
@@ -27,10 +27,10 @@ def make_suite(backend_name, Layer_Class):
             self.backend_name = backend_name
             set_backend(backend_name=self.backend_name)
             self.xp = config.xp
-            self.xp.random.seed(42)
+            self.xp.random.seed(self.SEED)
 
             self.layer = self.make_built_layer(
-                Layer_Class, n_inputs=self.N_INPUTS, n_neurons=self.N_NEURONS)
+                Layer_Class, seed =self.SEED, n_inputs=self.N_INPUTS, n_neurons=self.N_NEURONS)
             self.test_inputs = self.xp.random.randn(self.BATCH_SIZE, self.N_INPUTS).astype(self.xp.float32) 
 
         def test_forward_shape(self):
@@ -177,6 +177,83 @@ def make_suite(backend_name, Layer_Class):
             )
             self.assertLess(float(rel_error), 1e-4)
 
+        # ----Dense.build() Seed Tests ----------
+
+        def test_same_seed_produces_identical_weights(self):
+            """Two independently instantiated layers built with the exact same seed
+            must initialize with identical weight and bias values."""
+            layer_1 = Dense(n_inputs=self.N_INPUTS, n_neurons=self.N_NEURONS)
+            layer_2 = Dense(n_inputs=self.N_INPUTS, n_neurons=self.N_NEURONS)
+
+            seed_val = 123
+            layer_1.build(seed=seed_val)
+            layer_2.build(seed=seed_val)
+
+            # Weights and biases must match exactly bit-for-bit on the active backend
+            self.xp.testing.assert_array_equal(
+                layer_1.weights, layer_2.weights,
+                err_msg="Layers built with identical seeds produced diverging weights."
+            )
+            self.xp.testing.assert_array_equal(
+                layer_1.biases, layer_2.biases,
+                err_msg="Layers built with identical seeds produced diverging biases."
+            )
+
+        def test_different_seeds_produce_divergent_weights(self):
+            """Two layers built with different seeds must produce different parameter initializations."""
+            layer_1 = Dense(n_inputs=self.N_INPUTS, n_neurons=self.N_NEURONS)
+            layer_2 = Dense(n_inputs=self.N_INPUTS, n_neurons=self.N_NEURONS)
+
+            layer_1.build(seed=123)
+            layer_2.build(456)
+
+            # Weights should not be identical
+            self.assertFalse(
+                self.xp.array_equal(layer_1.weights, layer_2.weights),
+                msg="Layers built with different seeds produced identical weights."
+            )
+
+        def test_build_seed_does_not_corrupt_global_rng_stream(self):
+            """Calling build(seed=...) must draw from a local PRNG and avoid resetting
+            or corrupting the backend's ambient global random state."""
+            xp = self.xp
+
+            # Seed global backend state and sample a reference number
+            xp.random.seed(999)
+            val_before = float(xp.random.randn(1)[0])
+
+            # Reset global state to 999, build an intermediate layer with an isolated seed,
+            # and verify the next global draw is unaffected
+            xp.random.seed(999)
+            throwaway_layer = Dense(n_inputs=self.N_INPUTS, n_neurons=self.N_NEURONS)
+            throwaway_layer.build(seed=123)
+
+            val_after = float(xp.random.randn(1)[0])
+
+            self.assertAlmostEqual(
+                val_before, val_after, places=6,
+                msg="layer.build(seed=...) modified or reset the global backend random state."
+            )
+
+        def test_build_with_none_seed_uses_global_stream(self):
+            """Calling build(seed=None) should sequentially consume random numbers
+            from the global stream rather than throwing an error or using a static seed."""
+            xp = self.xp
+
+            xp.random.seed(777)
+            layer_1 = Dense(n_inputs=self.N_INPUTS, n_neurons=self.N_NEURONS)
+            layer_1.build(seed=None)
+
+            xp.random.seed(777)
+            layer_2 = Dense(n_inputs=self.N_INPUTS, n_neurons=self.N_NEURONS)
+            layer_2.build(seed=None)
+
+            self.xp.testing.assert_array_equal(
+                layer_1.weights,
+                layer_2.weights,
+                err_msg="build(seed=None) failed to follow global backend seeding."
+            )
+            
     TestDenseLayer.__name__ = class_name
     TestDenseLayer.__qualname__ = class_name
     return TestDenseLayer 
