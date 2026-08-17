@@ -1,265 +1,80 @@
-import copy
-import pickle
 import aether.config as config
-
-class Model:
-
-    #We create a list of network objects
+from aether.base import Layer
+from aether.losses import Loss, CategoricalCrossEntropy, SoftmaxCategoricalCrossEntropy
+from aether.metrics import Accuracy
+from aether.layers.activations import SoftMax
+class Model():
     def __init__(self):
-        self.layers = []    
-        self.softmax_classifier_output = None
-    #Now we are going to add objects to the model
+        self.layers = []
+        self.is_finalized = False
+        self.loss = None
+        self.optimizer = None
+        self.accuracy = None
+
     def add(self, layer):
+        if self.is_finalized:   
+            raise RuntimeError("Cannot modify model after finalize() has been called.")
+        
+        if not isinstance(layer, Layer):
+            raise TypeError(
+                f"Expected an instance of 'Layer', but got `{type(layer).__name__}`."
+                "Make sure the layer your passing in inherits from aether.base.Layer"
+            )
         self.layers.append(layer)
 
-    #All this does is set the loss and optimizer to the set class
-    #Since loss and optimizer have no default value we put the asterisk
-    def set(self, *, loss = None, optimizer = None, accuracy = None):
+    def configure(self, loss=None, optimizer=None, accuracy=None):
+        """Configures the training components (loss, optimizer, metrics) for the model.
+        Utilizes strict type checking for Loss and duck typing for optimizer/metric.
+        """
+        if loss is None and optimizer is None and accuracy is None:
+            raise ValueError(
+                "At least one component (loss, optimizer, or metrics) must be"
+                " provided to configure()."
+            )
+
         if loss is not None:
-            self.loss = loss
+            if not isinstance(loss, Loss):
+                raise TypeError(
+                    f"Expected an instance of 'Loss', but got {type(loss).__name__}."
+                    "Make sure the loss your passing in inherits from aether.losses.loss"
+                )
+            else:
+                self.loss = loss
 
         if optimizer is not None:
+            if not hasattr(optimizer, "update_params") and not hasattr(optimizer, "step"):                
+                raise TypeError(
+                    f"Object '{type(optimizer).__name__}' is not a valid optimizer."
+                    "Expected method 'update_params' or 'step'"
+                )
             self.optimizer = optimizer
-        
+
         if accuracy is not None:
+            if not isinstance(accuracy, Accuracy):
+                raise TypeError(
+                    f"Object '{type(accuracy).__name__}' is not a valid accuracy metric."
+                    "Make sure the accuracy your passing in inherits from aether.metrics.accuracy"
+                )
             self.accuracy = accuracy
 
-    def finalize(self):
-        #create and set the first input layer
-        self.input_layer = Layer_Input()
-        #count objects
-        layer_count = len(self.layers)
-
-        #Initialize a list containing trainable layers
-        self.trainable_layers = []
-        #iterate over the objects
-        for i in range(layer_count):
-            #check if it's the first layer
-            if i == 0:
-                self.layers[i].prev = self.input_layer
-                self.layers[i].next = self.layers[i+1]
-            
-            #All layers except the first and last
-            elif i < layer_count - 1:
-                self.layers[i].prev = self.layers[i-1]
-                self.layers[i].next = self.layers[i+1]
-            
-            else:
-                self.layers[i].prev = self.layers[i-1]
-                self.layers[i].next = self.loss 
-                self.output_layer_activation = self.layers[i]
-            
-            if hasattr(self.layers[i], 'weights'):
-                self.trainable_layers.append(self.layers[i])
-
-        for layer in self.layers:
-            if hasattr(layer, "build"):
-                layer.build()
-                
-        #update loss object with trainable layers
-        if self.loss is not None:
-            self.loss.remember_trainable_layers(self.trainable_layers)
-
-            self.softmax_classifier_output=self.loss.get_fused_loss(self.layers[-1])
-
-    def train(self, X, y, *, epochs = 1, batch_size = None, print_every = 1, validation_data = None):
-
-        xp = config.get_array_module(X)
-        #Initialize accuracy object
-        self.accuracy.init(y)
-
-        #default value if batch size is not being set
-        train_steps = 1
-
-        #default value if validation data is passed but we don't set
-        #batch size
-        validation_steps = 1
-        if validation_data is not None:
-            validation_steps = 1
-
-            X_val, y_val = validation_data
-
-        if batch_size is not None: 
-            train_steps = len(X) // batch_size
-
-            if train_steps * batch_size < len(X):
-                train_steps += 1
-            
-            if validation_steps is not None:
-                validation_steps = len(X_val) // batch_size
-
-                if validation_steps * batch_size < len(X_val):
-                    validation_steps += 1
-
-        print("Training")
-        for epoch in range(1, epochs+1):
-            print(f' epoch: {epoch}')
-            self.loss.new_pass()
-            self.accuracy.new_pass()
-
-            for step in range(train_steps):
-                if batch_size is None: 
-                    batch_X = X
-                    batch_y = y
-                else:
-                    batch_X = X[step*batch_size:(step + 1)* batch_size]
-                    batch_y = y[step*batch_size:(step + 1)* batch_size]
-                output = self.forward(batch_X, training = True)
-                #Loss
-                data_loss, regularization_loss = \
-                    self.loss.calculate(output, batch_y,
-                                        include_regularization = True,
-                                        training = True)
-                
-                loss = data_loss + regularization_loss
-                
-                #Predictions and get accuracy
-                predictions = self.output_layer_activation.predictions(output)
-                accuracy = self.accuracy.calculate(predictions, batch_y)
-
-                #Backwards pass
-                self.backward(output, batch_y)
-
-                self.optimizer.pre_update_parameters()
-                for layer in self.trainable_layers:
-                    self.optimizer.update_parameters(layer)
-                self.optimizer.post_update_parameters()
-
-                if not step % print_every or step == train_steps - 1: 
-                    print(f'epoch: {epoch}, ' +
-                        f'acc: {accuracy:.3f}, ' +
-                        f'loss: {loss:.3f} (' + 
-                        f'data_loss: {data_loss:.3f}, ' +
-                        f'reg_loss: {regularization_loss:.3f}, '+
-                        f'lr:: {self.optimizer.current_learning_rate}')
-
-        epoch_data_loss, epoch_regularization_loss = \
-            self.loss.calculate_accumulated(
-                include_regularization = True)
-        epoch_loss = epoch_data_loss + epoch_regularization_loss
-        epoch_accuracy = self.accuracy.calculate_accumulated()
-
-        print(f' training, ' + 
-              f'acc: {epoch_accuracy:.3f}, ' +
-              f'loss: {epoch_loss:.3f} (' + 
-              f'data_loss: {epoch_data_loss:.3f}, ' +
-              f'reg_loss: {epoch_regularization_loss:.3f}, ' +
-              f'lr:: {self.optimizer.current_learning_rate}')
- 
-        if validation_data is not None:
-
-            self.evaluate(*validation_data, batch_size = batch_size)
-
-    def forward(self, X, training):
-
-        #calls method on the input layer
-        #this will set the output property
-        #that the first layer in "prev" object is expecting
-        self.input_layer.forward(X, training)
-
-        #Class forward method of every object in chain
-        for layer in self.layers:
-            layer.forward(layer.prev.output, training)
-        return layer.output
-    
-    def backward(self, output, y):
-        
-        if self.softmax_classifier_output is not None:
-            #First call backward method on the
-            #combined activation/loss this will set 
-            #dinputs properly
-            self.softmax_classifier_output.backward(output, y, training = True)
-
-            #since we'll not call backward method of the last layer
-            #aka softmax since we're using combined activation/loss
-            #set dinputs into this object
-            self.layers[-1].dinputs = \
-                self.softmax_classifier_output.dinputs
-            #call backward method going through
-            #all the objects but last in
-            #reversed order passing dinputs as a parameter
-            for layer in reversed(self.layers[:-1]):
-                layer.backward(layer.next.dinputs)
-            
+    def _sync_device(self, target_device=None):
+        """Internal dispatch to compile all registered components into active backend."""
+        dev = target_device or getattr(self, "device", None)
+        if dev is None:
             return
-        
-        #First call the backwards method on loss
-        #This will set dinputs property that the last layer
-        #will access
-        self.loss.backward(output, y, training = True )
 
-        #Class backward method going through all the objects in reverse order
-        for layer in reversed(self.layers):
-            layer.backward(layer.next.dinputs)
-   
-    def backward_debug(self, X, y):
-        # Forward pass to set outputs
-        out = X
-        print("Forward pass:")
-        for i, layer in enumerate(self.layers):
-            out = layer.forward(out, training=True)
-            print(f"Layer {i} ({layer.__class__.__name__}) output: {out.shape}")
+        # Consolidate all model items (layers + training modules)
+        components = [
+            *self.layers,
+            getattr(self, "loss", None),
+            getattr(self, "optimizer", None),
+            getattr(self, "accuracy", None),
+        ]
 
-        # Backward pass starting from loss
-        print("\nBackward pass:")
-        # If you have a combined SoftMax + Loss layer
-        if self.softmax_classifier_output is not None:
-            self.softmax_classifier_output.backward(out, y)
-            self.layers[-1].dinputs = self.softmax_classifier_output.dinputs
+        for comp in components:
+            if comp is not None and hasattr(comp, "_compile_for_device"):
+                comp._compile_for_device(dev)
 
-            for i, layer in enumerate(reversed(self.layers[:-1])):
-                next_dinputs = layer.next.dinputs
-                layer.backward(next_dinputs)
-                print(f"Layer {-i-2} ({layer.__class__.__name__}) dinputs: {layer.dinputs.shape}")
-                if hasattr(layer, 'dweights'):
-                    print(f"             dweights: {layer.dweights.shape}")
-                if hasattr(layer, 'dbiases'):
-                    print(f"             dbiases: {layer.dbiases.shape}")
-
-        else:
-            # Separate loss backward
-            self.loss.backward(out, y)
-            for i, layer in enumerate(reversed(self.layers)):
-                next_dinputs = layer.next.dinputs
-                layer.backward(next_dinputs)
-                print(f"Layer {-i-1} ({layer.__class__.__name__}) dinputs: {layer.dinputs.shape}")
-                if hasattr(layer, 'dweights'):
-                    print(f"             dweights: {layer.dweights.shape}")
-                if hasattr(layer, 'dbiases'):
-                    print(f"             dbiases: {layer.dbiases.shape}")
-
-    def evaluate(self, X_val, y_val, *, batch_size = None):
-        validation_steps = 1
-        if batch_size is not None:
-            validation_steps = len(X_val) // batch_size
-            if validation_steps * batch_size < len(X_val):
-                validation_steps += 1 
-        #Reset accumulated values in loss
-        #and accuracy
-        self.loss.new_pass()
-        self.accuracy.new_pass()
-
-        for step in range(validation_steps):
-            if batch_size is None:
-                batch_X = X_val
-                batch_y = y_val
-            else:
-                batch_X = X_val[step * batch_size:(step+1)*batch_size]
-                batch_y = y_val[step * batch_size:(step+1)*batch_size]
-            
-            output = self.forward(batch_X, training = False)
-            self.loss.calculate(output, batch_y, training = False)
-            predictions = self.output_layer_activation.predictions(output)
-            self.accuracy.calculate(predictions, batch_y)
-
-        #Now we can get the validation loss and accuracy
-        validation_loss = self.loss.calculate_accumulated()
-        validation_accuracy = self.accuracy.calculate_accumulated()
-
-        print(f'Valdiation, ' +
-                f'acc: {validation_accuracy:.3f}, ' +
-                f'loss: {validation_loss:.3f}')
-        
     def to(self, device):
         """
         Ahead-Of-Time compilation and device migration.
@@ -272,6 +87,7 @@ class Model:
             device (str): The target hardware execution device 
             ('cupy' or 'numpy)
         Raises:
+            RuntimeError: If user calls model.to() before model.finalize()
             ValueError: If `device` specifies an unsupported or unconfigured backend
         
         Note:
@@ -279,105 +95,376 @@ class Model:
             (e.g., NumPy to CuPy), as it triggers internal array migrations and kernel
             allocations across all underlying components.
         """
+        if self.is_finalized:
+            raise RuntimeError(
+                "[aether] model.to() must be called BEFORE model.finalize(). " \
+                "Re-migrating an already finalized graph causes needless host-device copies."
+            )
         target_device = device.lower()
         config.set_backend(target_device)
         self.device = target_device
 
+        self._sync_device(target_device=target_device)
+
+    def set_precision(self, compute_dtype):
+        """
+        Sets the target floating-point precision policy on the model and
+        dispatches it to all registered layers, skipping any layer marked with
+        the `_precision_exempt` attribute.
+
+        Args:
+            compute_dtype (str): The target floating point precision, 
+            ('float16','float32', 'float64') 
+        Raises:
+            TypeError: If `compute_dtype` is not an str or None
+            ValueError: If `compute_dtype` is not one of the currently supported precision
+            RuntimeError: If `compute_dtype` is not supported in NumPy
+        Note:
+            Method can be called before or after both Model.to and Model.finalize, but must 
+            be called before training and inference. Layers makred with '_precision_exempt=True'
+            (e.g.) normalization or softmax layers retain single-precision compute to 
+            prevent numerical instabilility. Optimizer and Loss classes will also always 
+            perform single precision calculations. 
+        """
+        self.precision_policy = config.DTypePolicy(compute_dtype)
         for layer in self.layers:
-            if hasattr(layer, '_compile_for_device'):
-                layer._compile_for_device(target_device)
-                        
-        if hasattr(self, 'optimizer') and hasattr(self.optimizer, '_compile_for_device'):
-            self.optimizer._compile_for_device(target_device)
+            if (hasattr(layer, "_apply_precision")
+                 and not getattr(layer, "_precision_exempt", False)):
+                layer._apply_precision(self.precision_policy)
 
-        if hasattr(self, 'loss') and hasattr(self.loss, '_compile_for_device'):
-            self.loss._compile_for_device(target_device)
+    def finalize(self):
+        if self.is_finalized:   
+            raise RuntimeError("Cannot modify model after finalize() has been called.")
 
-        if hasattr(self, 'accuracy') and hasattr(self.accuracy, '_compile_for_device'):
-            self.accuracy._compile_for_device(target_device)        
+        if not self.layers:
+            raise RuntimeError("[aether] Cannot finalize an empty model. Please add layers via Model.add() first.")
 
-    #Returns paramteres of trainable layers
-    def get_parameters(self):
-        parameters = []
-        for layer in self.trainable_layers:
-            parameters.append(layer.get_parameters())
-        
-        return parameters 
-    
-    def set_parameters(self, parameters):
-        #Iterate over the parameters and layers
-        #Then we are to update each layer with each set of parameters
-        for parameter_set, layer in zip(parameters, self.trainable_layers):
-            layer.set_parameters(*parameter_set)
+        for layer in self.layers:
+            if hasattr(layer, "build") and callable(layer.build):
+                layer.build()
+                
+        self.trainable_layers = [
+            layer for layer in self.layers
+            if hasattr(layer, "weights") or hasattr(layer, "biases")
+        ]
 
-    def save_parameters(self, path):
-        
-        #Open a file in the binary-write mode
-        #and save the paramters to it
-        with open(path, 'wb') as f:
-            pickle.dump(self.get_parameters(), f)
-    
-    def load_parameters(self, path):
 
-        #Open a file in binary-read mode
-        #and load weightss and update training layers
-        with open(path, 'rb') as f:
-            self.set_parameters(pickle.load(f))
+        if self.loss is not None:
+            last_layer = self.layers[-1]
+            if isinstance(self.loss, SoftmaxCategoricalCrossEntropy) and isinstance(last_layer, SoftMax):
+                raise ValueError(
+                    "[aether] 'SoftmaxCategoricalCrossEntrpy' operates directly on unnormalized logits (S, C)." \
+                    "Do not add an explicit 'SoftMax' activation layer to the model."
+                )
 
-    def save(self, path):
-        model = copy.deepcopy(self)
+            if hasattr(self.loss, "remember_trainable_layers"):
+                self.loss.remember_trainable_layers(self.trainable_layers)
+            else:
+                self.loss.trainable_layers = self.trainable_layers
 
-        #Now we need to remove accumulated loss and accuracy
-        model.loss.new_pass()
-        model.accuracy.new_pass()
+        if self.optimizer is not None:
+            if not hasattr(self.optimizer, "step") or not hasattr(self.optimizer, "init_params"):
+                raise TypeError(
+                    f"Optimizer '{type(self.optimizer).__name__}' must implement "
+                    "'init_params(trainable_layers)' and 'step()'."
+                )
+            self.optimizer.init_params(self.trainable_layers)
+            self._step_optimizer = self.optimizer.step
+                
+        self._sync_device()
+        self.is_finalized = True
 
-        #Remove data from input, and gradients
-        model.input_layer.__dict__.pop('output', None)
-        model.loss.__dict__.pop('dinputs', None)
+    def forward(self, X, training=True):
+        """
+        Sequentially propagate input batch through all layers.
+        """
+        output = X
+        for layer in self.layers:
+            output = layer.forward(output, training=training)
+        return output
 
-        for layer in model.layers:
-            for property in ['inputs', 'output', 'dinputs', 
-                             'dweights', 'dbiases']:
-                layer.__dict__.pop(property, None)
-        
-        #Now we can save the model
-        with open(path, 'wb') as f:
-            pickle.dump(model, f)
-    
-    @staticmethod
-    def load(path):
-        
-        #Open file in the binary-read mode
-        with open(path, 'rb') as f:
-            model = pickle.load(f)
-        return model
-    
-    def predict(self, X, *, batch_size = None):
+    def backward(self, loss_dinputs):
+        """
+        Sequentially propagate loss gradients backward through layers in reverse order 
+        """
+        dinputs = loss_dinputs
+        for layer in reversed(self.layers):
+            dinputs = layer.backward(dinputs)
+        return dinputs
+
+    def train(
+        self,
+        X,
+        y,
+        *,
+        epochs=1,
+        batch_size=None,
+        print_every=1,
+        verbose = True,
+        validation_data=None
+    ):
+        """
+        Train the compiled neural network on dataset (X, y).
+
+        AOT scheduling to avoid python conditionals inside the main batch loops, minimizing 
+        CPU overhead
+
+        Args:
+            X (ndarray): Input features (NumPy or CuPy ndarray).
+            y (ndarray): Target labels or one-hot ground truths.
+            epochs (int): Number of full passes over the dataset.
+            batch_size (int, optional): Mini-batch sample size. Defaults to None (full-batch).
+            print_every (int): Step interval frequency for logging telemetry.
+            validation_data (tuple, optional): (X_val, y_val) tuple for out-of-sample testing.
+        """
+        if not self.is_finalized:
+            self.finalize()
+
+        num_samples = len(X)
+        effective_batch_size = batch_size if batch_size is not None else num_samples
+        train_steps = (num_samples + effective_batch_size - 1) // effective_batch_size
+
+        batch_slices = [
+            (step * effective_batch_size, min((step + 1) * effective_batch_size, num_samples))
+            for step in range(train_steps)
+        ]
+
+        # -----------------------------------------------------------------
+        # 2. Local Namespace Binding (Attribute caching to eliminate lookup latency)
+        # -----------------------------------------------------------------
+        forward_fn = self.forward
+        backward_fn = self.backward
+        loss = self.loss
+        accuracy = self.accuracy
+        step_optimizer = getattr(self, "_step_optimizer", None)
+
+        has_loss = loss is not None
+        has_acc = accuracy is not None
+        has_opt = callable(step_optimizer)
+
+        has_reg = False
+        if has_loss and hasattr(loss, "regularization_loss"):
+            has_reg = any(
+                getattr(layer, "weight_regularizer_l1", 0.0) > 0.0
+                or getattr(layer, "weight_regularizer_l2", 0.0) > 0.0
+                or getattr(layer, "bias_regularizer_l1", 0.0) > 0.0
+                or getattr(layer, "bias_regularizer_l2", 0.0) > 0.0
+                for layer in getattr(self, "trainable_layers", [])
+            )
+        reg_loss_fn = loss.regularization_loss if has_reg else None
+
+        if has_loss and has_acc and has_opt:
+            if has_reg:
+                def run_step(batch_X, batch_y):
+                    out = forward_fn(batch_X, training=True)
+                    data_l = loss.calculate(out, batch_y)
+                    reg_l = reg_loss_fn()
+                    acc_l = accuracy.calculate(out, batch_y)
+                    loss.backward(out, batch_y)
+                    backward_fn(loss.dinputs)
+                    step_optimizer()
+                    return data_l, reg_l, acc_l
+            else:
+                def run_step(batch_X, batch_y):
+                    out = forward_fn(batch_X, training=True)
+                    data_l = loss.calculate(out, batch_y)
+                    acc_l = accuracy.calculate(out, batch_y)
+                    loss.backward(out, batch_y)
+                    backward_fn(loss.dinputs)
+                    step_optimizer()
+                    return data_l, 0.0, acc_l
+
+        elif has_loss and has_opt:
+            if has_reg:
+                def run_step(batch_X, batch_y):
+                    out = forward_fn(batch_X, training=True)
+                    data_l = loss.calculate(out, batch_y)
+                    reg_l = reg_loss_fn()
+                    loss.backward(out, batch_y)
+                    backward_fn(loss.dinputs)
+                    step_optimizer()
+                    return data_l, reg_l, 0.0
+            else:
+                def run_step(batch_X, batch_y):
+                    out = forward_fn(batch_X, training=True)
+                    data_l = loss.calculate(out, batch_y)
+                    loss.backward(out, batch_y)
+                    backward_fn(loss.dinputs)
+                    step_optimizer()
+                    return data_l, 0.0, 0.0
+        else:
+            # Generic fallback
+            def run_step(batch_X, batch_y):
+                out = forward_fn(batch_X, training=True)
+                data_l = loss.calculate(out, batch_y) if has_loss else 0.0
+                reg_l = reg_loss_fn() if has_reg else 0.0
+                acc_l = accuracy.calculate(out, batch_y) if has_acc else 0.0
+                if has_loss:
+                    loss.backward(out, batch_y)
+                    backward_fn(loss.dinputs)
+                if has_opt:
+                    step_optimizer()
+                return data_l, reg_l, acc_l
+
+        get_lr = None
+        if self.optimizer is not None:
+            opt = self.optimizer
+            get_lr = lambda: getattr(opt, "current_learning_rate", getattr(opt, "lr", None))
+
+        for epoch in range(1, epochs + 1):
+            if has_loss:
+                loss.new_pass()
+            if has_acc:
+                accuracy.new_pass()
+
+            for step, (start_idx, end_idx) in enumerate(batch_slices):
+                batch_X = X[start_idx:end_idx]
+                batch_y = y[start_idx:end_idx]
+
+                data_loss, reg_loss, acc_val = run_step(batch_X, batch_y)
+
+                # Telemetry: GPU-to-Host sync barrier strictly confined to log steps
+                if verbose and print_every and (step % print_every == 0 or step == train_steps - 1):
+                    s_data_loss = float(data_loss)
+                    s_reg_loss = float(reg_loss)
+                    s_loss = s_data_loss + s_reg_loss
+                    s_acc = float(acc_val)
+
+                    lr_str = ""
+                    if get_lr is not None:
+                        lr = get_lr()
+                        if lr is not None:
+                            lr_str = f" - lr: {float(lr):.6f}"
+
+                    print(
+                        f"Epoch {epoch}/{epochs} | Step {step + 1}/{train_steps} "
+                        f"- loss: {s_loss:.4f} (data: {s_data_loss:.4f}, reg: {s_reg_loss:.4f}) "
+                        f"- acc: {s_acc:.4f}{lr_str}"
+                    )
+
+            if has_loss:
+                accum = loss.calculate_accumulated(include_regularization=has_reg)
+                epoch_loss = float(accum[0] + accum[1]) if isinstance(accum, tuple) else float(accum)
+            else:
+                epoch_loss = 0.0
+
+            epoch_acc = float(accuracy.calculate_accumulated()) if has_acc else 0.0
+
+            lr_summary = ""
+            if get_lr is not None:
+                lr = get_lr()
+                if lr is not None:
+                    lr_summary = f" - lr: {float(lr):.6f}"
+            if verbose and print_every:
+                print(
+                    f"[Epoch {epoch}/{epochs} Total] "
+                    f"loss: {epoch_loss:.4f} - acc: {epoch_acc:.4f}{lr_summary}"
+                )
+
+            if validation_data is not None:
+                X_val, y_val = validation_data
+                self.evaluate(X_val, y_val, batch_size=batch_size)
+
+    def evaluate(self, X_val, y_val, *, batch_size=None):
+        """
+        Evaluate the model's loss and metrics on validation/test data in inference mode.
+
+        Args:
+            X_val (ndarray): Evaluation input features (NumPy or CuPy ndarray).
+            y_val (ndarray): Ground truth labels or targets.
+            batch_size (int, optional): Mini-batch size. Defaults to None (full-batch).
+
+        Returns:
+            tuple: (val_loss, val_acc) representing the computed validation metrics.
+        """
+        if not self.is_finalized:
+            self.finalize()
+
+        num_samples = len(X_val)
+        effective_batch_size = batch_size if batch_size is not None else num_samples
+        eval_steps = (num_samples + effective_batch_size - 1) // effective_batch_size
+
+
+        has_loss = self.loss is not None
+        has_acc = self.accuracy is not None
+
+        if has_loss:
+            self.loss.new_pass()
+        if has_acc:
+            self.accuracy.new_pass()
+
+        # Cache local forward function
+        forward_fn = self.forward
+        loss = self.loss
+        accuracy = self.accuracy
+
+
+        for step in range(eval_steps):
+            start_idx = step * effective_batch_size
+            end_idx = min(start_idx + effective_batch_size, num_samples)
+
+            batch_X = X_val[start_idx:end_idx]
+            batch_y = y_val[start_idx:end_idx]
+
+            # Forward propagation in evaluation mode
+            output = forward_fn(batch_X, training=False)
+
+            # Accumulate batch metrics without tracking gradients or regularization
+            if has_loss:
+                loss.calculate(output, batch_y, training=False)
+
+            if has_acc:
+                accuracy.calculate(output, batch_y)
+
+
+        val_loss = float(loss.calculate_accumulated(include_regularization=False)) if has_loss else 0.0
+        val_acc = float(accuracy.calculate_accumulated()) if has_acc else 0.0
+
+        print(f"[Validation] loss: {val_loss:.4f} - acc: {val_acc:.4f}")
+
+        return val_loss, val_acc
+
+    def predict(self, X, *, batch_size=None, return_logits=False):
+        """
+        Run batch inference on inputs and return model predictions.
+
+        Automatically routes raw outputs through any fused loss activation
+        (e.g., SoftMax in SoftmaxCategoricalCrossEntropy) unless raw logits are requested.
+
+        Args:
+            X (ndarray): Input feature batch (NumPy or CuPy array).
+            batch_size (int, optional): Mini-batch sample size. Defaults to None (full-batch).
+            return_logits (bool, optional): If True, returns raw network logits
+                even if an output activation was fused into the loss. Defaults to False.
+
+        Returns:
+            ndarray: Model predictions (probabilities or stacked batch outputs).
+        """
+        if not self.is_finalized:
+            self.finalize()
+
         xp = config.get_array_module(X)
-        prediction_steps = 1
-        if batch_size is not None:
-            prediction_steps = len(X) // batch_size
+        num_samples = len(X)
+        effective_batch_size = batch_size if batch_size is not None else num_samples
+        prediction_steps = (num_samples + effective_batch_size - 1) // effective_batch_size
 
-            if prediction_steps * batch_size < len(X):
-                prediction_steps += 1
-        
-        output = []
+        forward_fn = self.forward
+        outputs = []
 
         for step in range(prediction_steps):
-            #If batch size is not set pass the whole dataset
-            if batch_size is None:
-                batch_X = X
-            else:
-                batch_X = X[step*batch_size:(step+1)*batch_size]
+            start_idx = step * effective_batch_size
+            end_idx = min(start_idx + effective_batch_size, num_samples)
 
-            #forward pass
-            batch_output = self.forward(batch_X, training = False)
-            #append batch prediction to the list of predictions
-            output.append(batch_output)
-        
-        #stack and return results
-        return xp.vstack(output)
-        
-class Layer_Input: 
-    def forward(self, inputs, training):
-        self.output = inputs
+            batch_X = X[start_idx:end_idx]
+            batch_output = forward_fn(batch_X, training=False)
+            outputs.append(batch_output)
+
+        result = xp.vstack(outputs)
+
+        if not return_logits:
+            loss_activation = getattr(self.loss, "activation", None)
+            if loss_activation is not None and hasattr(loss_activation, "forward"):
+                act_out = loss_activation.forward(result, training=False)
+                result = act_out if act_out is not None else getattr(loss_activation, "output", result)
+
+        return result

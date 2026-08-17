@@ -97,7 +97,7 @@ class Dense(Layer):
         self.weights = weights
         self.biases = biases
 
-class Flatten:
+class Flatten(Layer):
     def forward(self, inputs, training):
         # Save shape so we can restore it in backward pass
         self.inputs_shape = inputs.shape
@@ -109,3 +109,5 @@ class Flatten:
     def backward(self, dvalues):
         # Reshape gradients back to input shape
         self.dinputs = dvalues.reshape(self.inputs_shape)
+
+        return self.dinputs

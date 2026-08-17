@@ -10,7 +10,7 @@ Architecture Pattern:
 - Enforces state isolation per backend using `set_backend()` and `AetherBaseTestCase`.
 """
 import aether.config as config
-from tests.base_case import AetherBaseTestCase
+from tests.base_case import AetherBaseTestCase, AetherBaseLayerTestCase
 
 # Replace this with your specific layout import
 from aether.layers.conv import Conv
@@ -31,7 +31,9 @@ except (ImportError, Exception):
 def make_suite(backend_name, Layer_Class):
     class_name = f"Test_{Layer_Class.__name__}_{backend_name.upper()}"
     # Rewrite `TestLayer` for specific class being tested
-    class TestLayer(AetherBaseTestCase):
+    # Also, rewrite the parent class based on if a layer is being tested 
+    # or another component is being tested
+    class TestLayer(AetherBaseLayerTestCase):
         # Place any constants here
         INPUT_SHAPE = (28, 28, 1)
         NUM_FILTERS = 4
