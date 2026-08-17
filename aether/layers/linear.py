@@ -106,12 +106,12 @@ class Dense(Layer):
 
 class Flatten(Layer):
     def forward(self, inputs, training):
-        # Save shape so we can restore it in backward pass
-        self.inputs_shape = inputs.shape
-        # Flatten all dimensions except batch size
-        self.output = inputs.reshape(inputs.shape[0], -1)
+        xp = config.get_array_module(inputs)
 
-        return self.output
+        if training:
+            self.inputs_shape = inputs.shape
+
+        return xp.ascontiguousarray(inputs.reshape(inputs.shape[0], -1))
     
     def backward(self, dvalues):
         # Reshape gradients back to input shape
