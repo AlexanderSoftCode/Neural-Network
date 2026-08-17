@@ -1,3 +1,4 @@
+import warnings
 import numpy as np
 import aether.config as config
 from aether.config import DTypePolicy, COMPUTE_DTYPE, PARAM_DTYPE
@@ -14,13 +15,28 @@ def make_dtype_suite(backend_name: str):
     class TestDTypePolicy(AetherBaseTestCase):
 
         def setUp(self):
+            super().setUp()
             self.backend_name = backend_name
             config.set_backend(self.backend_name)
             self.xp = config.xp
 
-        # ==========================================
-        # Initialization Guardrails
-        # ==========================================
+            # Suppress NumPy float16 emulation warnings only during DTypePolicy testing
+            self._warn_ctx = warnings.catch_warnings()
+            self._warn_ctx.__enter__()
+            warnings.filterwarnings(
+                "ignore",
+                message=r".*NumPy float16 is emulated.*",
+                category=UserWarning
+            )
+
+        def tearDown(self):
+            # Clean up the warning context first
+            if hasattr(self, "_warn_ctx"):
+                self._warn_ctx.__exit__(None, None, None)
+            
+            super().tearDown()
+
+        # ---- Initialization Guardrails --------------
 
         def test_invalid_string_raises_value_error(self):
             """Ensure passing strings outside COMPUTE_DTYPE raises ValueError."""
@@ -47,9 +63,7 @@ def make_dtype_suite(backend_name: str):
                     self.assertEqual(policy.compute_dtype_name, dt)
                     self.assertEqual(policy.param_dtype, np.dtype(PARAM_DTYPE))
 
-        # ==========================================
-        # Casting Integrity
-        # ==========================================
+        # ---- Casting Integrity --------------
 
         def test_cast_to_compute_none_returns_identity(self):
             """Verify cast_to_compute returns unchanged reference when compute_dtype is None."""
@@ -86,12 +100,10 @@ def make_dtype_suite(backend_name: str):
             weight_tensor = self.xp.array([1.0, 2.0], dtype=np.float32)
             bias_tensor = None
 
-            # Test cast_to_compute
             res_w, res_b = policy.cast_to_compute(weight_tensor, bias_tensor)
             self.assertEqual(res_w.dtype, self.xp.float16)
             self.assertIsNone(res_b)
 
-            # Test cast_to_param
             res_pw, res_pb = policy.cast_to_param(res_w, bias_tensor)
             self.assertEqual(res_pw.dtype, self.xp.float32)
             self.assertIsNone(res_pb)
