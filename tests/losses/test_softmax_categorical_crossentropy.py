@@ -102,8 +102,7 @@ def make_suite(backend_name, Layer_Class):
             ])
 
             self.layer.forward(logits, y_true, training=True)
-
-            self.layer.backward(self.layer.output, y_true)
+            self.layer.backward(logits, y_true)
 
             self.assertEqual(self.layer.dinputs.shape, logits.shape)
 
@@ -122,18 +121,18 @@ def make_suite(backend_name, Layer_Class):
             ])
             # Find expected dinputs
             self.layer.forward(logits, y_true, training=True)
-            probs = self.layer.output
-            self.layer.backward(self.layer.output, y_true)
+            probs = self.layer.activation.output
+            self.layer.backward(logits, y_true)
             expected_dinputs = self.layer.dinputs
 
-            # Calulate desired dinputs accounting for label smoothing
+            # Calculate desired dinputs accounting for label smoothing
             ls = self.layer.label_smoothing
             num_samples, n_classes = logits.shape
             y_true_smooth = y_true * (1.0 - ls) + (ls / n_classes)
 
             # Compare results 
             desired_dinputs = (probs - y_true_smooth) / num_samples
-            self.xp.testing.assert_allclose(expected_dinputs, desired_dinputs, rtol= 1e-4)
+            self.xp.testing.assert_allclose(expected_dinputs, desired_dinputs, rtol=1e-4)
 
         def test_backward_matches_two_step_chain(self):
             """ Verify the combined loss classes dinputs matches the backwards pass
@@ -157,13 +156,14 @@ def make_suite(backend_name, Layer_Class):
             layer_cce_loss.backward(layer_softmax.output, y_true)
             layer_softmax.backward(layer_cce_loss.dinputs)
             actual_dinputs = layer_softmax.dinputs
+
             self.layer.forward(logits, y_true, training=True)
-            self.layer.backward(self.layer.output, y_true)
+            self.layer.backward(logits, y_true)
             expected_dinputs = self.layer.dinputs
-            self.xp.testing.assert_allclose(actual_dinputs, expected_dinputs, rtol=1e-4) 
+            self.xp.testing.assert_allclose(actual_dinputs, expected_dinputs, rtol=1e-4)
 
         def test_backward_does_not_mutate_dvalues(self):
-            """Confirm the method does not modify dvalues in place"""
+            """Confirm the method does not modify logits in place"""
 
             logits = self.xp.array([
                 [-1.2,  4.5,  0.8, -0.5],
@@ -176,12 +176,13 @@ def make_suite(backend_name, Layer_Class):
             ], dtype=self.xp.float32)
 
             self.layer.forward(logits, y_true, training=True)
-            dvalues = self.layer.output
-            dvalues_snapshot = dvalues.copy()
-            self.layer.backward(dvalues, y_true)
+            logits_snapshot = logits.copy()
+            self.layer.backward(logits, y_true)
 
-            self.xp.testing.assert_array_equal(dvalues_snapshot, dvalues,
-                                               err_msg = 'dvalues was mutated in place')
+            self.xp.testing.assert_array_equal(
+                logits_snapshot, logits,
+                err_msg='logits was mutated in place'
+            )
 
         def test_backward_sparse_and_onehot_labels_agree(self): 
             """dinputs identical regardless of label format"""
@@ -200,17 +201,17 @@ def make_suite(backend_name, Layer_Class):
             # One hot version
             layer_onehot = self.make_layer(
                 SoftmaxCategoricalCrossEntropy, label_smoothing=self.LABEL_SMOOTHING
-                )
+            )
             layer_onehot.forward(logits, y_true_onehot, training=True)
-            layer_onehot.backward(layer_onehot.output, y_true_onehot)
+            layer_onehot.backward(logits, y_true_onehot)
             dinputs_onehot = layer_onehot.dinputs.copy()
 
             # Sparse version
             layer_sparse = self.make_layer(
                 SoftmaxCategoricalCrossEntropy, label_smoothing=self.LABEL_SMOOTHING
-                )
+            )
             layer_sparse.forward(logits, y_true_sparse, training=True)
-            layer_sparse.backward(layer_sparse.output, y_true_sparse)
+            layer_sparse.backward(logits, y_true_sparse)
             dinputs_sparse = layer_sparse.dinputs.copy()
 
             self.xp.testing.assert_allclose(dinputs_onehot, dinputs_sparse)
@@ -227,12 +228,12 @@ def make_suite(backend_name, Layer_Class):
             ], dtype=self.xp.float32)
 
             loss = self.layer.forward(logits, y_true, training=True)
-            self.assertEqual(self.layer.output.shape, (1, 4))
-            self.assertFalse(self.xp.isnan(loss))
+            self.assertEqual(self.layer.activation.output.shape, (1, 4))
+            self.assertFalse(self.xp.isnan(loss).any())
 
-            self.layer.backward(self.layer.output, y_true)
+            self.layer.backward(logits, y_true)
             self.assertEqual(self.layer.dinputs.shape, (1, 4))
-            self.assertFalse(self.xp.any(self.xp.isnan(loss)))
+            self.assertFalse(self.xp.isnan(self.layer.dinputs).any())
 
         def test_backward_numerical_check(self):
             """Numerical gradient check for standard Softmax + CCE (label_smoothing = 0.0)"""
@@ -249,7 +250,7 @@ def make_suite(backend_name, Layer_Class):
             ], dtype=self.xp.float32)
 
             layer.forward(logits, y_true, training=True)
-            layer.backward(layer.output, y_true)
+            layer.backward(logits, y_true)
             analytical_dinputs = layer.dinputs.copy()
 
             h = 1e-4
@@ -289,8 +290,7 @@ def make_suite(backend_name, Layer_Class):
             ], dtype=self.xp.float32)
 
             _ = self.layer.forward(logits, y_true, training=True)
-            probs = self.layer.output
-            self.layer.backward(probs, y_true, training=True)
+            self.layer.backward(logits, y_true, training=True)
             analytical_dinputs = self.layer.dinputs
 
             num_dinputs = self.xp.zeros_like(logits)
@@ -314,7 +314,6 @@ def make_suite(backend_name, Layer_Class):
                 atol=1e-3,
                 err_msg="Analytical dinputs do not match numerical finite difference gradients!"
             )
-
 
     TestActivationSoftmaxLossCCE.__name__ = class_name
     TestActivationSoftmaxLossCCE.__qualname__ = class_name

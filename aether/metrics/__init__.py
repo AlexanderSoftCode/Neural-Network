@@ -1,6 +1,7 @@
 from aether._lazy import install_lazy_attrs
 
 _ACC_MODULES = {
+    "Accuracy":                "aether.metrics.accuracy",
     "CategoricalAccuracy":     "aether.metrics.accuracy",
     "RegressionAccuracy":      "aether.metrics.accuracy"
 }

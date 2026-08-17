@@ -60,20 +60,25 @@ class Loss:
     def regularization_loss(self):
         regularization_loss = 0             # if we don't do this, we risk overfitting.
                                             # We will have to denote partials for this too...
-        for layer in self.trainable_layers:        
+        
+        for layer in getattr(self, "trainable_layers", []):        
             xp = config.get_array_module(layer.weights)
+            
+            weights_fp32 = layer.weights.astype(xp.float32, copy=False)
+            biases_fp32 = layer.biases.astype(xp.float32, copy=False)
+
             if layer.weight_regularizer_l1 > 0:
                 regularization_loss += layer.weight_regularizer_l1 * \
-                                        xp.sum(xp.abs(layer.weights))
+                                        xp.sum(xp.abs(weights_fp32))
             if layer.weight_regularizer_l2 > 0:
                 regularization_loss += layer.weight_regularizer_l2 * \
-                                        xp.sum(layer.weights * layer.weights)
+                                        xp.sum(weights_fp32 * weights_fp32)
             if layer.bias_regularizer_l1 > 0:
                 regularization_loss += layer.bias_regularizer_l1 * \
-                                        xp.sum(xp.abs(layer.biases))
+                                        xp.sum(xp.abs(biases_fp32))
             if layer.bias_regularizer_l2 > 0:
                 regularization_loss += layer.bias_regularizer_l2 * \
-                                        xp.sum(layer.biases * layer.biases) 
+                                        xp.sum(biases_fp32 * biases_fp32) 
         return regularization_loss
 
 
@@ -84,38 +89,42 @@ class CategoricalCrossEntropy(Loss):
 
     def forward(self, y_pred, y_true, training = True):
         xp = config.get_array_module(y_pred)
+        y_pred_fp32 = y_pred.astype(xp.float32, copy=False)
         n_classes = y_pred.shape[1]
-        y_pred_clip = xp.clip(y_pred, 1e-7, 1 - 1e-7) #.000001 -> .999999
+        y_pred_clip = xp.clip(y_pred_fp32, 1e-7, 1 - 1e-7) #.000001 -> .999999
         y_true_sparse = _to_sparse_labels(xp, y_true)
 
         return _cce_per_sample_loss(xp, y_pred_clip, y_true_sparse, n_classes, self.label_smoothing, training)
 
-    def backward(self, dvalues, y_true, training=True):
-        xp = config.get_array_module(dvalues)
-        samples = len(dvalues)
-        n_classes = dvalues.shape[1]
+    def backward(self, logits, y_true, training=True):
 
+        xp = config.get_array_module(logits)
+        samples = len(logits)
+        n_classes = logits.shape[1]
+
+        logits_fp32 = logits.astype(xp.float32, copy=False)
         y_true_sparse = _to_sparse_labels(xp, y_true)
-        dvalues_clip = xp.clip(dvalues, 1e-7, 1 - 1e-7)
+        logits_clip = xp.clip(logits_fp32, 1e-7, 1 - 1e-7)
         sample_idx = xp.arange(samples)
 
-        dinputs = xp.zeros_like(dvalues)
-        target_probs = dvalues_clip[sample_idx, y_true_sparse]
+        dinputs = xp.zeros_like(logits)
+        target_probs = logits_clip[sample_idx, y_true_sparse]
 
         if self.label_smoothing > 0 and training:
-            dinputs += -(self.label_smoothing / n_classes) / dvalues_clip / samples
+            dinputs += -(self.label_smoothing / n_classes) / logits_clip / samples
             dinputs[sample_idx, y_true_sparse] -= (1.0 - self.label_smoothing) / target_probs / samples
         else:
             dinputs[sample_idx, y_true_sparse] = -1.0 / target_probs / samples
 
-        self.dinputs = dinputs
+        self.dinputs = dinputs.astype(logits.dtype, copy=False)
+        return self.dinputs
 
 
 class SoftmaxCategoricalCrossEntropy(Loss):
     def __init__(self, label_smoothing = 0.0):
+        super().__init__()
         self.activation = SoftMax()
         self.label_smoothing = label_smoothing
-        super().__init__()
 
         self.backward = self._backward_fallback
 
@@ -129,38 +138,39 @@ class SoftmaxCategoricalCrossEntropy(Loss):
 
     #y_true is the vector of correct class indices, one per sample.
     #inputs is the raw logits, shape (n_samples, n_classes)
-    def forward(self, inputs, y_true, training = True):
-        xp = config.get_array_module(inputs)
+    def forward(self, logits, y_true, training = True):
+        xp = config.get_array_module(logits)
 
-        self.activation.forward(inputs, training=training)  # call forward function of softmax
-        self.output = self.activation.output                
+        self.activation.forward(logits, training=training)  # call forward function of softmax
+        probs = self.activation.output                
 
-        n_classes = self.output.shape[1]
+        probs_fp32 = probs.astype(xp.float32, copy=False)
+        n_classes = probs_fp32.shape[1]
         y_true_sparse = _to_sparse_labels(xp, y_true)
-        probs_clip = xp.clip(self.output, 1e-7, 1 - 1e-7)
+        # [CHANGE]: Fixed bug where `self.output` was referenced instead of the local `probs_fp32`
+        probs_clip = xp.clip(probs_fp32, 1e-7, 1 - 1e-7)
 
         # Per-sample array, NOT a reduced scalar -- Loss.calculate() means
         # to call xp.mean()/xp.sum()/len() on this directly.
         return _cce_per_sample_loss(xp, probs_clip, y_true_sparse, n_classes, self.label_smoothing, training)
-
+    
     def predictions(self, outputs):
         """Mirrors the functionality of softmax predictions, we require this as we pop softmax in combined pass"""
         xp = config.get_array_module(outputs)
         return xp.argmax(outputs, axis = 1)
 
-    def _backward_fallback(self, dvalues, y_true, training = True):
-        xp = config.get_array_module(dvalues)
-        samples = len(dvalues)
-        n_classes = dvalues.shape[1]
+    def _backward_fallback(self, logits, y_true, training=True):
+        xp = config.get_array_module(logits)
+        samples = len(logits)
+        n_classes = logits.shape[1]
 
+        # Compute probabilities directly from the logits passed into backward
+        probs = self.activation.forward(logits, training=training)
+        probs_fp32 = probs.astype(xp.float32, copy=False)
         y_true_sparse = _to_sparse_labels(xp, y_true)
         sample_idx = xp.arange(samples)
 
-        # dinputs = (dvalues - y_true_smooth) / samples, built via copy +
-        # scatter instead of materializing y_true_smooth as a full (S, C)
-        # one-hot array.
-        dinputs = dvalues.copy()
-
+        dinputs = probs_fp32.copy()
         if self.label_smoothing > 0 and training:
             dinputs -= self.label_smoothing / n_classes
             dinputs[sample_idx, y_true_sparse] -= (1.0 - self.label_smoothing)
@@ -168,13 +178,18 @@ class SoftmaxCategoricalCrossEntropy(Loss):
             dinputs[sample_idx, y_true_sparse] -= 1.0
 
         dinputs /= samples
-        self.dinputs = dinputs
+        self.dinputs = dinputs.astype(logits.dtype, copy=False)
         return self.dinputs
 
-    def _backward_gpu(self, dvalues, y_true, training = True):
-        xp = config.get_array_module(dvalues)
-        samples = len(dvalues)
-        n_classes = dvalues.shape[1]
+    def _backward_gpu(self, logits, y_true, training=True):
+        xp = config.get_array_module(logits)
+        samples = len(logits)
+        n_classes = logits.shape[1]
+
+        # Reuse probabilities computed during loss.forward()
+        # (Avoids redundant SoftMax kernel execution)
+        probs = self.activation.output
+        probs_fp32 = probs.astype(xp.float32, copy=False)
 
         y_true_sparse = _to_sparse_labels(xp, y_true).astype(xp.int64, copy=False)
         class_idx = xp.arange(n_classes, dtype=xp.int64).reshape(1, n_classes)
@@ -185,7 +200,9 @@ class SoftmaxCategoricalCrossEntropy(Loss):
         target_offset = np.float32(1.0 - self.label_smoothing if apply_smoothing else 1.0)
         inv_samples = np.float32(1.0 / samples)
 
-        self.dinputs = gpu_loss.softmax_cce_backward(
-            dvalues, y_true_row, class_idx, smooth_offset, target_offset, inv_samples
+        dinputs = gpu_loss.softmax_cce_backward(
+            probs_fp32, y_true_row, class_idx, smooth_offset, target_offset, inv_samples
         )
+
+        self.dinputs = dinputs.astype(logits.dtype, copy=False)
         return self.dinputs

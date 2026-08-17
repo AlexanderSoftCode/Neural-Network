@@ -44,6 +44,9 @@ class CategoricalAccuracy(Accuracy):
     
     def compare(self, predictions, y):
         xp = config.get_array_module(predictions)
+
+        if len(predictions.shape) == 2:
+            predictions = xp.argmax(predictions, axis=1)
         if len(y.shape) == 2:
             y = xp.argmax(y, axis = 1)
         return predictions == y
