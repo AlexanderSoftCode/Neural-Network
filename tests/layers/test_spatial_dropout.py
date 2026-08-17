@@ -106,31 +106,30 @@ def make_suite(backend_name, Layer_Class):
 
         # ---- philox / GPU-path bookkeeping --------------------------------
 
-        def test_call_counter_incrememnts_on_gpu_path(self):
+        def test_call_counter_increments_on_gpu_path(self):
             if not self.uses_gpu_kernel:
-                self.skipTest('_call_counter/offset bookkeeping only applies to the philox GPU path')
+                self.skipTest('offset bookkeeping only applies to the philox GPU path')
 
-            layer = self.make_layer(Layer_Class, rate= 0.5)
+            layer = self.make_layer(Layer_Class, rate=0.5)
             tensor_shape = (2, 5, 5, 25)
-            inputs = self.xp.ones(shape=tensor_shape, dtype = self.xp.float32)
+            inputs = self.xp.ones(shape=tensor_shape, dtype=self.xp.float32)
 
-            self.assertEqual(layer._call_counter, 0)
+            self.assertEqual(layer.rng.offset, 0)
             layer.forward(inputs, training=True)
-            self.assertEqual(layer._call_counter, 1)
-            self.assertEqual(layer.offset, 1)
+            self.assertEqual(layer.rng.offset, 1)
             layer.forward(inputs, training=True)
-            self.assertEqual(layer._call_counter, 2)
-            self.assertEqual(layer.offset, 2)
+            self.assertEqual(layer.rng.offset, 2)
 
         def test_eval_mode_does_not_bump_call_counter(self):
             if not self.uses_gpu_kernel:
-                self.skipTest('_call_counter bookkeeping only applies to the philox GPU path')
+                self.skipTest('offset bookkeeping only applies to the philox GPU path')
 
             tensor_shape = (2, 5, 5, 25)
             layer = self.make_layer(Layer_Class, rate=0.5)
             inputs = self.xp.ones(shape=tensor_shape, dtype=self.xp.float32)
             layer.forward(inputs, training=False)
-            self.assertEqual(layer._call_counter, 0)
+            self.assertEqual(layer.rng.offset, 0)
+
     TestSpatialDropout.__name__ = class_name
     TestSpatialDropout.__qualname__ = class_name
 

@@ -1,4 +1,4 @@
-import aether.config as config 
+import aether.config as config
 from tests.base_case import AetherBaseLayerTestCase
 from aether.layers.dropout import Dropout
 
@@ -88,12 +88,7 @@ def make_suite(backend_name, Layer_Class):
             self.assertAlmostEqual(dropped_fraction, rate, delta=0.02)
   
         def test_backward_uses_same_mask_and_scale_as_forward(self):
-            # With inputs == dvalues == 1, forward's kept-unit value
-            # (x / keep_prob) and backward's kept-unit value
-            # (dvalue / keep_prob) land on exactly the same numbers *and*
-            # the same positions only if forward/backward share one mask
-            # (i.e. backward correctly reuses the offset/mask from the
-            # preceding forward call rather than drawing a fresh one).
+            
             layer = self.make_layer(Layer_Class, rate=0.5)
             n = 5000
             inputs = self.xp.ones(n, dtype=self.xp.float32)
@@ -110,32 +105,37 @@ def make_suite(backend_name, Layer_Class):
             first = self.layer.forward(inputs, training=True)
             second = self.layer.forward(inputs, training=True)
             self.assertFalse(bool(self.xp.all(first == second)))
- 
+
         # ---- philox / GPU-path bookkeeping --------------------------------
  
-        def test_call_counter_increments_on_gpu_path(self):
+        def test_offset_increments_on_gpu_path(self):
             if not self.uses_gpu_kernel:
-                self.skipTest('_call_counter/offset bookkeeping only applies to the philox GPU path')
- 
+                self.skipTest('offset bookkeeping only applies to the philox GPU path')
+
             layer = self.make_layer(Layer_Class, rate=0.5)
             inputs = self.xp.ones(100, dtype=self.xp.float32)
- 
-            self.assertEqual(layer._call_counter, 0)
+
+            # Offset starts at 0 before any training steps
+            self.assertEqual(layer.rng.offset, 0)
+
+            # First training forward pass advances offset
             layer.forward(inputs, training=True)
-            self.assertEqual(layer._call_counter, 1)
-            self.assertEqual(layer.offset, 1)
+            self.assertEqual(layer.rng.offset, 1)
+
+            # Second training forward pass advances offset again
             layer.forward(inputs, training=True)
-            self.assertEqual(layer._call_counter, 2)
-            self.assertEqual(layer.offset, 2)
- 
-        def test_eval_mode_does_not_bump_call_counter(self):
+            self.assertEqual(layer.rng.offset, 2)
+
+        def test_eval_mode_does_not_bump_offset(self):
             if not self.uses_gpu_kernel:
-                self.skipTest('_call_counter bookkeeping only applies to the philox GPU path')
- 
+                self.skipTest('offset bookkeeping only applies to the philox GPU path')
+
             layer = self.make_layer(Layer_Class, rate=0.5)
             inputs = self.xp.ones(100, dtype=self.xp.float32)
+
+            # Inference / evaluation pass should not step the RNG state
             layer.forward(inputs, training=False)
-            self.assertEqual(layer._call_counter, 0)
+            self.assertEqual(layer.rng.offset, 0)
  
     TestDropout.__name__ = class_name
     TestDropout.__qualname__ = class_name
