@@ -1,8 +1,19 @@
+import json
+import zipfile
+import numpy as np
+
 import aether.config as config
+import aether.layers as layer_module
+
 from aether.base import Layer
-from aether.losses import Loss, CategoricalCrossEntropy, SoftmaxCategoricalCrossEntropy
+from aether.losses import Loss, SoftmaxCategoricalCrossEntropy
 from aether.metrics import Accuracy
-from aether.layers.activations import SoftMax
+
+try:
+    import safetensors.numpy
+except ImportError:
+    safetensors = None
+
 class Model():
     def __init__(self):
         self.layers = []
@@ -173,7 +184,7 @@ class Model():
 
         if self.loss is not None:
             last_layer = self.layers[-1]
-            if isinstance(self.loss, SoftmaxCategoricalCrossEntropy) and isinstance(last_layer, SoftMax):
+            if isinstance(self.loss, SoftmaxCategoricalCrossEntropy) and isinstance(last_layer, layer_module.SoftMax):
                 raise ValueError(
                     "[aether] 'SoftmaxCategoricalCrossEntropy' operates directly on unnormalized logits (S, C). "
                     "Do not add an explicit 'SoftMax' activation layer to the model."
@@ -501,3 +512,158 @@ class Model():
                 result = act_out if act_out is not None else getattr(loss_activation, "output", result)
 
         return result
+
+    def save(self, filepath: str):
+        """
+        Saves the model architecture and parameters to a single .aether archive.
+
+        Args:
+            filepath (str): Path to output file (e.g. 'cifar10.aether').
+        Raises:
+            RuntimeError: If model is not finalized.
+            ImportError: If safetensors is not installed.
+        """
+        if not self.is_finalized:
+            raise RuntimeError(
+                "[aether] Cannot save an unfinalized model. "
+                "Call model.finalize(input_shape) first."
+            )
+
+        if safetensors is None:
+            raise ImportError(
+                "[aether] 'safetensors' is required for model serialization. "
+                "Install it with `pip install safetensors`."
+            )
+
+        # 1. Capture Top-Level Config & Layer Manifest
+        input_shape = self.layers[0].input_shape
+        precision_str = (
+            self.precision_policy.compute_dtype_name
+            if getattr(self, "precision_policy", None)
+            else None
+        )
+
+        arch_manifest = {
+            "schema_version": "1.0",
+            "input_shape": list(input_shape),
+            "seed": self._seed,
+            "precision_policy": precision_str,
+            "layers": [
+                {
+                    "index": idx,
+                    "class_name": type(layer).__name__,
+                    "config": layer.get_config(),
+                }
+                for idx, layer in enumerate(self.layers)
+            ],
+        }
+
+        # 2. Extract & Normalize Weights (Always CPU NumPy & C-Contiguous)
+        weight_dict = {}
+        for idx, layer in enumerate(self.layers):
+            for name, tensor in layer.get_parameters().items():
+                if tensor is None:
+                    continue
+                cpu_array = config.to_device(tensor, target="numpy")
+                weight_dict[f"{idx}.{name}"] = np.ascontiguousarray(cpu_array)
+
+        # 3. Serialize to Uncompressed/Deflated Zip Bundle
+        weights_bytes = safetensors.numpy.save(weight_dict)
+        arch_json_bytes = json.dumps(arch_manifest, indent=2).encode("utf-8")
+
+        with zipfile.ZipFile(filepath, "w") as zipf:
+            zipf.writestr(
+                "architecture.json", arch_json_bytes, compress_type=zipfile.ZIP_DEFLATED
+            )
+            zipf.writestr(
+                "weights.safetensors", weights_bytes, compress_type=zipfile.ZIP_STORED
+            )
+
+    @classmethod
+    def load(cls, filepath: str, device: str | None = None) -> "Model":
+        """Loads a model architecture and parameters from an .aether zip archive.
+
+        Args:
+            filepath (str): Path to the saved .aether model file.
+            device (str, optional): Target hardware device ('numpy' or 'cupy').
+                Defaults to None (uses current active backend).
+
+        Returns:
+            Model: A finalized and initialized Model instance.
+        """
+        if safetensors is None:
+            raise ImportError(
+                "[aether] 'safetensors' is required to load models. "
+                "Install it with `pip install safetensors`."
+            )
+
+        # -------------------------------------------------------------
+        # 1. Unpack Zip Archive in Memory
+        # -------------------------------------------------------------
+        with zipfile.ZipFile(filepath, "r") as zipf:
+            arch_bytes = zipf.read("architecture.json")
+            weights_bytes = zipf.read("weights.safetensors")
+
+        manifest = json.loads(arch_bytes.decode("utf-8"))
+        raw_weights = safetensors.numpy.load(weights_bytes)
+
+        # -------------------------------------------------------------
+        # 2. Reconstruct Model Graph & Layers
+        # -------------------------------------------------------------
+        model = cls()
+
+        if manifest.get("seed") is not None:
+            model.manual_seed(manifest["seed"])
+
+        for layer_entry in manifest.get("layers", []):
+            class_name = layer_entry["class_name"]
+            cfg = layer_entry.get("config", {})
+
+            sanitized_cfg = {
+                k: tuple(v) if isinstance(v, list) else v
+                for k, v in cfg.items()
+            }
+
+            # Resolved on demand via layer_module.__getattr__
+            layer_cls = getattr(layer_module, class_name, None)
+            if layer_cls is None:
+                raise ValueError(
+                    f"[aether] Unknown layer class '{class_name}' found in saved manifest."
+                )
+
+            model.add(layer_cls(**sanitized_cfg))
+
+        # -------------------------------------------------------------
+        # 3. Hardware Backend Migration & Graph Finalization
+        # -------------------------------------------------------------
+        if device is not None:
+            model.to(device)
+
+        input_shape = tuple(manifest["input_shape"])
+        model.finalize(input_shape=input_shape)
+
+        # -------------------------------------------------------------
+        # 4. Group & Hydrate Parameters into Layers
+        # -------------------------------------------------------------
+        layer_param_map: dict[int, dict] = {}
+        for flat_key, array in raw_weights.items():
+            if "." not in flat_key:
+                continue
+            idx_str, param_name = flat_key.split(".", 1)
+            idx = int(idx_str)
+            if idx not in layer_param_map:
+                layer_param_map[idx] = {}
+
+            layer_param_map[idx][param_name] = config.to_device(array)
+
+        for idx, params in layer_param_map.items():
+            if idx < len(model.layers):
+                model.layers[idx].set_parameters(**params)
+
+        # -------------------------------------------------------------
+        # 5. Apply Precision Policy
+        # -------------------------------------------------------------
+        if manifest.get("precision_policy") is not None:
+            model.set_precision(manifest["precision_policy"])
+
+        return model
