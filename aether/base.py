@@ -2,10 +2,26 @@ import numpy as np
 import aether.config as config
 
 class Layer:
-    precision_policy = None
-    def __init__(self, seed: int | None = None):
-        self.seed = seed
+    _precision_exempt: bool = False
+    def __init__(self):
+        self.seed = None
+        # these attributes below will likely be used for Model.save()
+        self.input_shape = None
+        self.output_shape = None
+        self.weights = None 
+        self.biases = None
+        self.precision_policy = None
 
+    def build(self, input_shape, seed=None):
+        """
+        Base build contract: stores shapes and passes through.
+        Does not mutate self.seed on stateless layers.
+        """
+        self.input_shape = input_shape
+        self.output_shape = input_shape
+
+        return self.output_shape
+    
     def _apply_precision(self, policy):
         self.precision_policy = policy
 

@@ -139,37 +139,47 @@ class Model():
                  and not getattr(layer, "_precision_exempt", False)):
                 layer._apply_precision(self.precision_policy)
 
-    def finalize(self):
+    def finalize(self, input_shape: tuple[int, ...]):
+        """
+        Finalizes the model architecture, propagating tensor dimensions
+        and allocating weights/buffers across all registered layers.
+        """
         if self.is_finalized:   
             raise RuntimeError("Cannot modify model after finalize() has been called.")
 
         if not self.layers:
             raise RuntimeError("[aether] Cannot finalize an empty model. Please add layers via Model.add() first.")
 
+        current_shape = input_shape
+
         for idx, layer in enumerate(self.layers):
-            if hasattr(layer, "build") and callable(layer.build):
-                layer_seed = (self._seed + idx) if self._seed is not None else None
-                layer.build(seed=layer_seed)
-                
-            elif hasattr(layer, "_set_seed") and callable(layer._set_seed):
-                if getattr(layer, "seed", None) is None and self._seed is not None:
-                    layer._set_seed(self._seed)
-                
+            layer_seed = (self._seed + idx) if self._seed is not None else None
+            
+            # 1. Unconditionally build and propagate shape
+            try:
+                current_shape = layer.build(current_shape, seed=layer_seed)
+            except TypeError:
+                current_shape = layer.build(current_shape)
+
+            # 2. Stochastic layers (e.g. Dropout RNG stream) rebind if needed
+            if hasattr(layer, "_set_seed"):
+                if layer.seed is None and layer_seed is not None:
+                    layer._set_seed(layer_seed)
+
         self.trainable_layers = [
             layer for layer in self.layers
-            if hasattr(layer, "weights") or hasattr(layer, "biases")
+            if getattr(layer, "weights", None) is not None or getattr(layer, "biases", None) is not None
         ]
 
         if self.loss is not None:
             last_layer = self.layers[-1]
             if isinstance(self.loss, SoftmaxCategoricalCrossEntropy) and isinstance(last_layer, SoftMax):
                 raise ValueError(
-                    "[aether] 'SoftmaxCategoricalCrossEntrpy' operates directly on unnormalized logits (S, C)." \
+                    "[aether] 'SoftmaxCategoricalCrossEntropy' operates directly on unnormalized logits (S, C). "
                     "Do not add an explicit 'SoftMax' activation layer to the model."
                 )
 
             self.loss.remember_trainable_layers(self.trainable_layers)
-            
 
         if self.optimizer is not None:
             if not hasattr(self.optimizer, "step") or not hasattr(self.optimizer, "init_params"):
@@ -228,7 +238,10 @@ class Model():
             validation_data (tuple, optional): (X_val, y_val) tuple for out-of-sample testing.
         """
         if not self.is_finalized:
-            self.finalize()
+            raise RuntimeError(
+                "[aether] Model must be explicitly finalized before training. "
+                "Call model.finalize(input_shape) first."
+            )
 
         num_samples = len(X)
         effective_batch_size = batch_size if batch_size is not None else num_samples
@@ -386,10 +399,14 @@ class Model():
             verbose (bool, optional): If True, prints evaluation loss and accuracy metrics to stdout. Defaults to True.   
         Returns:
             tuple: (val_loss, val_acc) representing the computed validation metrics.
+        Raises:
+            RuntimeError: If model has not been explicitly finalized before calling evaluate().
         """
         if not self.is_finalized:
-            self.finalize()
-
+            raise RuntimeError(
+                "[aether] Model must be explicitly finalized before evaluation. "
+                "Call model.finalize(input_shape) first."
+            )
         num_samples = len(X_val)
         effective_batch_size = batch_size if batch_size is not None else num_samples
         eval_steps = (num_samples + effective_batch_size - 1) // effective_batch_size
@@ -450,9 +467,14 @@ class Model():
 
         Returns:
             ndarray: Model predictions (probabilities or stacked batch outputs).
+        Raises:
+            RuntimeError: If model has not been explicitly finalized before calling predict().
         """
         if not self.is_finalized:
-            self.finalize()
+            raise RuntimeError(
+                "[aether] Model must be explicitly finalized before prediction. "
+                "Call model.finalize(input_shape) first."
+            )
 
         xp = config.get_array_module(X)
         num_samples = len(X)

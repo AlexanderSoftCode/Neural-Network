@@ -31,6 +31,7 @@ def _fused_leaky_relu_backward(dvalues, output, alpha):
 class LeakyReLU(Layer):
 
     def __init__(self, alpha=0.01):
+        super().__init__()
         self.alpha = alpha
 
         self.forward = self._forward_fallback

@@ -1,3 +1,4 @@
+import math
 import numpy as np
 import aether.config as config
 from aether.base import Layer
@@ -13,6 +14,7 @@ class Dense(Layer):
         self.bias_regularizer_l1 = bias_regularizer_l1
         self.bias_regularizer_l2 = bias_regularizer_l2
 
+        self.seed = None
         self.weights = None
         self.biases = None
 
@@ -23,24 +25,40 @@ class Dense(Layer):
         self._inputs_compute = None
         self._weights_compute = None 
 
-    def build(self, seed: int | None = None):
+    def build(self, input_shape: tuple[int, ...], seed: int | None = None) -> tuple[int, ...]:    
         """
         Called once by Model.finalize(). config.xp is guaranteed to be
         correctly set if the user called model.to() beforehand.
         """
-        #With He initalization, our fan_in maintains proper variance through layers.
+        super().build(input_shape)
         xp = config.xp
-        std = xp.sqrt(2.0 / self.n_inputs, dtype=xp.float32)
 
-        if seed is not None:
-            rng = xp.random.RandomState(seed)
+        
+        if self.n_inputs != input_shape[0]:
+            raise ValueError(
+                f"[aether] Shape mismatch in Dense layer: configured with n_inputs={self.n_inputs}, "
+                f"but received input shape with dimension {input_shape[0]} ({input_shape})."
+            )
+
+        self.input_shape = input_shape
+
+        
+        std = (2.0 / self.n_inputs) ** 0.5
+
+        effective_seed = seed if seed is not None else self.seed
+        if effective_seed is not None:
+            self.seed = effective_seed
+            rng = xp.random.RandomState(effective_seed)
             raw_weights = rng.randn(self.n_inputs, self.n_neurons)
         else:
             raw_weights = xp.random.randn(self.n_inputs, self.n_neurons)
 
-        self.weights = raw_weights.astype(xp.float32, copy=False) * std
+        self.weights = (raw_weights * std).astype(xp.float32, copy=False)
         self.biases = xp.zeros((1, self.n_neurons), dtype=xp.float32)
 
+        self.output_shape = (self.n_neurons,)
+        return self.output_shape
+        
     def _apply_precision(self, policy):
         """
         Called on Model.set_precision(), stores current policy and invalidates shadow
@@ -105,16 +123,22 @@ class Dense(Layer):
         self.biases = biases
 
 class Flatten(Layer):
+
+    def build(self, input_shape: tuple[int, ...], seed: int | None = None) -> tuple[int, ...]:    
+        super().build(input_shape)
+        self.input_shape = input_shape 
+        
+        # Calculate scalar integer dimension using standard library math.prod
+        flat_dim = math.prod(input_shape)
+        
+        self.output_shape = (flat_dim,)
+        return self.output_shape
+
     def forward(self, inputs, training):
         xp = config.get_array_module(inputs)
-
-        if training:
-            self.inputs_shape = inputs.shape
 
         return xp.ascontiguousarray(inputs.reshape(inputs.shape[0], -1))
     
     def backward(self, dvalues):
-        # Reshape gradients back to input shape
-        self.dinputs = dvalues.reshape(self.inputs_shape)
-
+        self.dinputs = dvalues.reshape(-1, *self.input_shape)
         return self.dinputs

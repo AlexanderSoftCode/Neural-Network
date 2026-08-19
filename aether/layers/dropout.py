@@ -37,7 +37,7 @@ class DropoutRNGState:
     
 class Dropout(Layer): 
     def __init__(self, rate, seed=None):
-        super().__init__(seed=seed)
+        super().__init__()
         self.keep_rate = 1 - rate
 
         self.rng = DropoutRNGState(base_seed=self.seed)
@@ -97,7 +97,7 @@ class Dropout(Layer):
 class SpatialDropout(Layer): 
     
     def __init__(self, rate, seed=None):
-        super().__init__(seed=seed)
+        super().__init__()
         self.rate = rate
         self.keep_rate = 1 - rate
 

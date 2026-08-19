@@ -8,8 +8,31 @@ from aether.custom_kernels.launch_math import _compute_magic_numbers
 class _PoolNd(Layer):
 
     def __init__(self):
+        super().__init__()
         self._launch_cache = {}
 
+    def build(self, input_shape: tuple[int, ...], seed: int | None = None) -> tuple[int, ...]:
+        """
+        Computes spatial downsampled output for shape (H_out, W_out, C)
+        for AvgPool2d and MaxPool2d, weights and seed are ignored
+        """
+        super().build(input_shape)
+
+        H_in, W_in, C_in = input_shape
+        fH, fW = self.filter_size
+        sH, sW = self.stride
+
+        if self.padding == "same":
+            H_out = int(np.ceil(H_in / sH))
+            W_out = int(np.ceil(W_in / sW))
+        elif self.padding == "valid":
+            H_out = int(np.floor((H_in - fH) / sH) + 1)
+            W_out = int(np.floor((W_in - fW) / sW) + 1)
+        else:
+            raise ValueError(f"Unsupported padding mode '{self.padding}'. Use 'same' or 'valid'.")
+
+        self.output_shape = (H_out, W_out, C_in)
+        return self.output_shape
     @staticmethod
     def _resolve_gpu_variant():
         """CUDA vs HIP variant + recommended launch block depth.
@@ -453,6 +476,14 @@ class GlobalAvgPool(Layer):
         super().__init__()
         self._launch_cache = {}
 
+    def build(self, input_shape: tuple[int, ...], seed: int | None = None) -> tuple[int, ...]:
+        super().build(input_shape)
+    
+        C_in = input_shape[-1]
+        
+    
+        self.output_shape = (C_in,)
+        return self.output_shape
     @staticmethod
     def _resolve_gpu_variant():
         """CUDA vs HIP variant + recommended launch block depth."""
