@@ -21,8 +21,8 @@ def make_suite(backend_name, Layer_Class):
             config.set_backend(backend_name=self.backend_name)
             self.xp = config.xp
             
-            self.layer = self.make_layer(
-                Layer_Class
+            self.layer = self.make_built_layer(
+                Layer_Class, input_shape=(3,)
             )
 
         def test_forward_pass(self):
@@ -83,28 +83,31 @@ def make_suite(backend_name, Layer_Class):
 
         def test_forward_does_not_mutate_input(self):
             """Forward pass should not alter incoming inputs."""
+            layer = self.make_built_layer(Layer_Class, input_shape=(4,))
             inputs = self.xp.array([
                 [-2.0, 0.0, 1.0, 3.0]
             ], dtype=self.xp.float32)
             original_inputs = inputs.copy()
 
-            self.layer.forward(inputs, training=False)
+            layer.forward(inputs, training=False)
             self.xp.testing.assert_array_equal(inputs, original_inputs)
 
         def test_backward_does_not_mutate_dvalues(self):
             """Backward pass should not alter incoming dvalues."""
+            layer = self.make_built_layer(Layer_Class, input_shape=(4,))
+
             inputs = self.xp.array([
                 [-2.0, 0.0, 1.0, 3.0]
             ], dtype=self.xp.float32)
 
-            self.layer.forward(inputs, training=True)
+            layer.forward(inputs, training=True)
 
             dvalues = self.xp.array([
                 [0.5, 1.5, -2.0, 3.0]
             ], dtype=self.xp.float32)
             original_dvalues = dvalues.copy()
 
-            self.layer.backward(dvalues)
+            layer.backward(dvalues)
 
             self.xp.testing.assert_array_equal(dvalues, original_dvalues)
     TestReLU.__name__ = class_name

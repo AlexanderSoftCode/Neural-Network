@@ -22,7 +22,10 @@ def make_suite(backend_name, Layer_Class):
             self.backend_name = backend_name
             config.set_backend(backend_name)
             self.xp = config.xp
-            self.layer = self.make_layer(Layer_Class, label_smoothing=self.LABEL_SMOOTHING)
+            self.layer = self.make_component(
+                Layer_Class, 
+                label_smoothing=self.LABEL_SMOOTHING,
+            )
             self.layer.new_pass()
 
         def test_output_matches_softmax_forward(self):
@@ -35,8 +38,13 @@ def make_suite(backend_name, Layer_Class):
                 [1.0, 0.0, 0.0, 0.0],
                 [0.0, 0.0, 1.0, 0.0]
             ])
-            layer_softmax = self.make_layer(SoftMax)
-            layer_cce_loss = self.make_layer(CategoricalCrossEntropy, label_smoothing=self.LABEL_SMOOTHING)
+            layer_softmax = self.make_component(
+                SoftMax,
+            )
+            layer_cce_loss = self.make_component(
+                CategoricalCrossEntropy, 
+                label_smoothing=self.LABEL_SMOOTHING,
+            )
             layer_cce_loss.new_pass()
             
             softmax_output = layer_softmax.forward(logits, training=True)
@@ -61,8 +69,13 @@ def make_suite(backend_name, Layer_Class):
                 [1.0, 0.0, 0.0, 0.0],
                 [0.0, 0.0, 1.0, 0.0]
             ])
-            layer_softmax = self.make_layer(SoftMax)
-            layer_cce_loss = self.make_layer(CategoricalCrossEntropy, label_smoothing=self.LABEL_SMOOTHING)
+            layer_softmax = self.make_component(
+                SoftMax,
+            )
+            layer_cce_loss = self.make_component(
+                CategoricalCrossEntropy, 
+                label_smoothing=self.LABEL_SMOOTHING,
+            )
             
             softmax_output = layer_softmax.forward(logits, training=True)
             expected_separate_output = layer_cce_loss.calculate(softmax_output, y_true, training=True)
@@ -148,8 +161,13 @@ def make_suite(backend_name, Layer_Class):
                 [0.0, 0.0, 0.0, 1.0]
             ])
 
-            layer_softmax = self.make_layer(SoftMax)
-            layer_cce_loss = self.make_layer(CategoricalCrossEntropy, label_smoothing=self.LABEL_SMOOTHING)
+            layer_softmax = self.make_component(
+                SoftMax,
+            )
+            layer_cce_loss = self.make_component(
+                CategoricalCrossEntropy, 
+                label_smoothing=self.LABEL_SMOOTHING,
+            )
 
             layer_softmax.forward(logits, training=True)
             layer_cce_loss.calculate(layer_softmax.output, y_true, training=True)
@@ -199,16 +217,18 @@ def make_suite(backend_name, Layer_Class):
             y_true_sparse = self.xp.array([1, 3], dtype=self.xp.int32)
 
             # One hot version
-            layer_onehot = self.make_layer(
-                SoftmaxCategoricalCrossEntropy, label_smoothing=self.LABEL_SMOOTHING
+            layer_onehot = self.make_component(
+                SoftmaxCategoricalCrossEntropy, 
+                label_smoothing=self.LABEL_SMOOTHING,
             )
             layer_onehot.forward(logits, y_true_onehot, training=True)
             layer_onehot.backward(logits, y_true_onehot)
             dinputs_onehot = layer_onehot.dinputs.copy()
 
             # Sparse version
-            layer_sparse = self.make_layer(
-                SoftmaxCategoricalCrossEntropy, label_smoothing=self.LABEL_SMOOTHING
+            layer_sparse = self.make_component(
+                SoftmaxCategoricalCrossEntropy, 
+                label_smoothing=self.LABEL_SMOOTHING,
             )
             layer_sparse.forward(logits, y_true_sparse, training=True)
             layer_sparse.backward(logits, y_true_sparse)
@@ -237,7 +257,10 @@ def make_suite(backend_name, Layer_Class):
 
         def test_backward_numerical_check(self):
             """Numerical gradient check for standard Softmax + CCE (label_smoothing = 0.0)"""
-            layer = self.make_layer(SoftmaxCategoricalCrossEntropy, label_smoothing=0.0)
+            layer = self.make_component(
+                SoftmaxCategoricalCrossEntropy, 
+                label_smoothing=0.0,
+            )
 
             logits = self.xp.array([
                 [-1.2,  4.5,  0.8, -0.5],

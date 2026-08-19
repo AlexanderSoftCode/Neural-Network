@@ -22,7 +22,10 @@ def make_suite(backend_name, Layer_Class):
             config.set_backend(backend_name=self.backend_name)
             self.xp = config.xp
 
-            self.layer = self.make_layer(Layer_Class)
+            self.layer = self.make_built_layer(
+                Layer_Class, 
+                input_shape=(self.H, self.W, self.C),
+            )
             self.test_images = self.xp.random.randn(self.S, self.H, self.W, self.C).astype(self.xp.float32)
             func_obj = getattr(self.layer.forward, 'func', self.layer.forward)
             self.uses_gpu_kernel = (getattr(func_obj, '__name__', '') == '_forward_gpu')
@@ -38,12 +41,18 @@ def make_suite(backend_name, Layer_Class):
                 self.skipTest("Applies only to CuPy pass")
 
 
-            layer_cpu = GlobalAvgPool()
+            layer_cpu = self.make_built_layer(
+                GlobalAvgPool, 
+                input_shape=(self.H, self.W, self.C),
+            )
             layer_cpu._compile_for_device("numpy")
             cpu_output = layer_cpu.forward(self.test_images, training=True)
 
             gpu_inputs = cp.array(self.test_images)
-            layer_gpu = GlobalAvgPool()
+            layer_gpu = self.make_built_layer(
+                GlobalAvgPool, 
+                input_shape=(self.H, self.W, self.C),
+            )
             layer_gpu._compile_for_device("cupy")
             gpu_output = layer_gpu.forward(gpu_inputs, training=True)
 
@@ -96,7 +105,10 @@ def make_suite(backend_name, Layer_Class):
             x_np = np.random.randn(S_small, H_small, W_small, C_small).astype(np.float32)
             x_xp = self.xp.array(x_np)
             
-            small_layer = self.make_layer(Layer_Class)
+            small_layer = self.make_built_layer(
+                Layer_Class, 
+                input_shape=(H_small, W_small, C_small),
+            )
             small_layer.forward(x_xp, training=True)
             
             dvalues_np = np.random.randn(S_small, C_small).astype(np.float32)

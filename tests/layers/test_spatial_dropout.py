@@ -19,22 +19,22 @@ def make_suite(backend_name, Layer_Class):
     class TestSpatialDropout(AetherBaseLayerTestCase):
         DEFAULT_RATE = 0.5
         FIXED_SEED = 12345
+        INPUT_SHAPE = (28, 28, 8)
         def setUp(self):
             config.set_backend(backend_name=backend_name)
             self.xp = config.xp
             self.backend_name = backend_name
 
-            self.layer = self.make_layer(
-                Layer_Class, rate=self.DEFAULT_RATE, seed=self.FIXED_SEED
+            self.layer = self.make_built_layer(
+                Layer_Class, input_shape=(self.INPUT_SHAPE), seed=self.FIXED_SEED, rate=self.DEFAULT_RATE
             )
             # Skip certain GPU tests using the flag when running on np backend
             self.uses_gpu_kernel = (self.layer.forward.__name__ == '_forward_gpu')
 
         def test_keep_rate_computed_from_rate(self):
             rate = 0.35
-            layer = self.make_layer(Layer_Class, rate=rate)
+            layer = self.make_built_layer(Layer_Class, input_shape=self.INPUT_SHAPE, seed=self.FIXED_SEED, rate=rate)
             self.assertAlmostEqual(layer.keep_rate, 1-rate, places=7)
-        # Implement more tests if needed by creating more functions 
         
         def test_forward_output_shape_matches_input_Id(self):
             inputs = self.xp.ones((2, 28, 28, 8), dtype=self.xp.float32)
@@ -44,8 +44,9 @@ def make_suite(backend_name, Layer_Class):
 
         def test_forward_eval_mode_is_identity_copy(self):
             # 2 * 4 * 4 * 3 = 96 total elements
+            layer = self.make_built_layer(Layer_Class, input_shape=(4, 4, 3), seed=self.FIXED_SEED, rate=self.DEFAULT_RATE)
             inputs = self.xp.arange(96, dtype=self.xp.float32).reshape(2,4,4,3)
-            output = self.layer.forward(inputs, training=False)
+            output = layer.forward(inputs, training=False)
 
             self.assertTrue(bool(self.xp.all(output == inputs)))
 
@@ -53,7 +54,7 @@ def make_suite(backend_name, Layer_Class):
             output[0, 0, 0, 0] = 999.0
             self.assertNotEqual(inputs[0, 0, 0, 0].item(), 999.0)
         def test_forward_training_zero_rate_is_identity(self):
-            layer = self.make_layer(Layer_Class, rate=0.0)
+            layer = self.make_built_layer(Layer_Class, input_shape = (10, 10, 5), seed=self.FIXED_SEED, rate=0.0)
             # 2 * 10 * 10 * 5 = 1000 total elements
             inputs = self.xp.linspace(0.1, 5.0, 1000, dtype=self.xp.float32).reshape(2, 10, 10, 5)
             output = layer.forward(inputs, training=True)
@@ -62,7 +63,7 @@ def make_suite(backend_name, Layer_Class):
         def test_forward_scales_kept_units_by_inverse_keep_rate(self):
             rate = 0.3
             keep_rate = 1 - rate
-            layer = self.make_layer(Layer_Class, rate=rate)
+            layer = self.make_built_layer(Layer_Class, input_shape= (10, 10, 6), seed=self.FIXED_SEED, rate=rate)
             tensor_shape = (3, 10, 10, 6)
             inputs = self.xp.ones(shape=tensor_shape, dtype=self.xp.float32)
 
@@ -77,7 +78,7 @@ def make_suite(backend_name, Layer_Class):
         def test_forward_drops_approximately_expected_fraction(self):
             rate = 0.4
             # Pass the fixed seed directly so both CPU and GPU kernels generate deterministic masks
-            layer = self.make_layer(Layer_Class, rate=rate, seed=self.FIXED_SEED)
+            layer = self.make_built_layer(Layer_Class, input_shape=(10, 10, 100), rate=rate, seed=self.FIXED_SEED)
             
             tensor_shape = (20, 10, 10, 100)
             inputs = self.xp.ones(shape=tensor_shape, dtype=self.xp.float32)
@@ -87,7 +88,7 @@ def make_suite(backend_name, Layer_Class):
             self.assertAlmostEqual(dropped_fraction, rate, delta=0.08)
 
         def test_backward_uses_same_mask_and_scale_as_forward(self):
-            layer = self.make_layer(Layer_Class, rate=0.5)
+            layer = self.make_built_layer(Layer_Class, input_shape=(4, 4, 20), rate=0.5)
             tensor_shape = (1, 4, 4, 20)
             inputs = self.xp.ones(shape=tensor_shape, dtype=self.xp.float32)
             forward_out = layer.forward(inputs, training=True)
@@ -98,9 +99,10 @@ def make_suite(backend_name, Layer_Class):
 
         def test_repeated_forward_calls_use_different_masks(self): 
             tensor_shape = (2, 10, 10, 25)
+            layer = self.make_built_layer(Layer_Class, input_shape=(10, 10, 25), seed=self.FIXED_SEED, rate=self.DEFAULT_RATE)
             inputs = self.xp.ones(tensor_shape, dtype=self.xp.float32)
-            first = self.layer.forward(inputs, training=True)
-            second = self.layer.forward(inputs, training=True)
+            first = layer.forward(inputs, training=True)
+            second = layer.forward(inputs, training=True)
             self.assertFalse(bool(self.xp.all(first == second)))
 
         # ---- philox / GPU-path bookkeeping --------------------------------
@@ -109,7 +111,7 @@ def make_suite(backend_name, Layer_Class):
             if not self.uses_gpu_kernel:
                 self.skipTest('offset bookkeeping only applies to the philox GPU path')
 
-            layer = self.make_layer(Layer_Class, rate=0.5)
+            layer = self.make_built_layer(Layer_Class, input_shape=(5, 5, 25), seed=self.FIXED_SEED, rate=0.5)
             tensor_shape = (2, 5, 5, 25)
             inputs = self.xp.ones(shape=tensor_shape, dtype=self.xp.float32)
 
@@ -124,7 +126,7 @@ def make_suite(backend_name, Layer_Class):
                 self.skipTest('offset bookkeeping only applies to the philox GPU path')
 
             tensor_shape = (2, 5, 5, 25)
-            layer = self.make_layer(Layer_Class, rate=0.5)
+            layer = self.make_built_layer(Layer_Class, input_shape=(5, 5, 25), seed=self.FIXED_SEED, rate=0.5)
             inputs = self.xp.ones(shape=tensor_shape, dtype=self.xp.float32)
             layer.forward(inputs, training=False)
             self.assertEqual(layer.rng.offset, 0)

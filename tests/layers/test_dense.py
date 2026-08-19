@@ -30,7 +30,11 @@ def make_suite(backend_name, Layer_Class):
             self.xp.random.seed(self.SEED)
 
             self.layer = self.make_built_layer(
-                Layer_Class, seed =self.SEED, n_inputs=self.N_INPUTS, n_neurons=self.N_NEURONS)
+                Layer_Class,
+                input_shape = (self.N_INPUTS,),
+                seed =self.SEED, 
+                n_inputs=self.N_INPUTS, 
+                n_neurons=self.N_NEURONS)
             self.test_inputs = self.xp.random.randn(self.BATCH_SIZE, self.N_INPUTS).astype(self.xp.float32) 
 
         def test_forward_shape(self):
@@ -48,7 +52,7 @@ def make_suite(backend_name, Layer_Class):
             self.assertTrue(self.xp.all(self.layer.biases == 0))
 
             # He initialization scale check
-            large_layer = self.make_built_layer(Layer_Class, n_inputs=256, n_neurons=256)
+            large_layer = self.make_built_layer(Layer_Class, input_shape=(256,), n_inputs=256, n_neurons=256)
             expected_std = float(self.xp.sqrt(2.0 / 256))
             actual_std = float(self.xp.std(large_layer.weights))
             self.assertAlmostEqual(actual_std, expected_std, delta=0.03)
@@ -57,7 +61,7 @@ def make_suite(backend_name, Layer_Class):
         def test_dense_zero_input(self):
             "Given an input of all zeros, show an output of all zeros (plus biases)"
 
-            layer = self.make_built_layer(Dense, n_inputs = 728, n_neurons=20)
+            layer = self.make_built_layer(Dense, input_shape = (728,), n_inputs = 728, n_neurons=20)
             
             zero_input = self.xp.zeros((1, 728))
 
@@ -140,7 +144,7 @@ def make_suite(backend_name, Layer_Class):
 
         def test_numerical_gradient_check(self):
             """Finite difference verification of analytical dweights and dinputs."""
-            layer = self.make_built_layer(Layer_Class, n_inputs=4, n_neurons=3)
+            layer = self.make_built_layer(Layer_Class, input_shape=(4,), n_inputs=4, n_neurons=3)
             layer.weights = layer.weights.astype(self.xp.float64)
             layer.biases = layer.biases.astype(self.xp.float64)
 
@@ -186,8 +190,8 @@ def make_suite(backend_name, Layer_Class):
             layer_2 = Dense(n_inputs=self.N_INPUTS, n_neurons=self.N_NEURONS)
 
             seed_val = 123
-            layer_1.build(seed=seed_val)
-            layer_2.build(seed=seed_val)
+            layer_1.build(input_shape = (self.N_INPUTS,), seed=seed_val)
+            layer_2.build(input_shape = (self.N_INPUTS,), seed=seed_val)
 
             # Weights and biases must match exactly bit-for-bit on the active backend
             self.xp.testing.assert_array_equal(
@@ -204,8 +208,8 @@ def make_suite(backend_name, Layer_Class):
             layer_1 = Dense(n_inputs=self.N_INPUTS, n_neurons=self.N_NEURONS)
             layer_2 = Dense(n_inputs=self.N_INPUTS, n_neurons=self.N_NEURONS)
 
-            layer_1.build(seed=123)
-            layer_2.build(456)
+            layer_1.build(input_shape = (self.N_INPUTS,), seed=123)
+            layer_2.build(input_shape = (self.N_INPUTS,), seed=456)
 
             # Weights should not be identical
             self.assertFalse(
@@ -226,7 +230,7 @@ def make_suite(backend_name, Layer_Class):
             # and verify the next global draw is unaffected
             xp.random.seed(999)
             throwaway_layer = Dense(n_inputs=self.N_INPUTS, n_neurons=self.N_NEURONS)
-            throwaway_layer.build(seed=123)
+            throwaway_layer.build(input_shape = (self.N_INPUTS,), seed=123)
 
             val_after = float(xp.random.randn(1)[0])
 
@@ -242,11 +246,11 @@ def make_suite(backend_name, Layer_Class):
 
             xp.random.seed(777)
             layer_1 = Dense(n_inputs=self.N_INPUTS, n_neurons=self.N_NEURONS)
-            layer_1.build(seed=None)
+            layer_1.build(input_shape = (self.N_INPUTS,), seed=None)
 
             xp.random.seed(777)
             layer_2 = Dense(n_inputs=self.N_INPUTS, n_neurons=self.N_NEURONS)
-            layer_2.build(seed=None)
+            layer_2.build(input_shape = (self.N_INPUTS,), seed=None)
 
             self.xp.testing.assert_array_equal(
                 layer_1.weights,
@@ -260,6 +264,6 @@ def make_suite(backend_name, Layer_Class):
 
 for backend in backends_to_test:
 
-    class_name = f"Test_{TARGET_LAYER}.__name__)_{backend.upper()}"
+    class_name = f"Test_{TARGET_LAYER.__name__}_{backend.upper()}"
 
     globals()[class_name] = make_suite(backend_name=backend, Layer_Class=TARGET_LAYER)

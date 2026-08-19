@@ -83,7 +83,14 @@ class AetherBaseLayerTestCase(AetherBaseTestCase):
 
         layer.build(input_shape, seed=seed)
         return layer
-
+    def make_component(self, component_cls, **kwargs):
+        """Instantiates any non-layer aether-component (e.g. Loss, Optimizer, etc.)
+        and compiles backend_specific-kernels if supported.
+        """
+        instance = component_cls(**kwargs)
+        if hasattr(instance, "_compile_for_device"):
+            instance._compile_for_device(self.backend_name)
+        return instance
     def set_precision(self, layer, compute_dtype):
         """Helper mirroring Model.set_precision behavior for an individual layer."""
         # Since I find them annoying, we'll ignore the known emulation warnings after 

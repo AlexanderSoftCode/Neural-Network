@@ -25,7 +25,7 @@ def make_suite(backend_name, Optimizer_Class):
             self.backend_name = config.set_backend(backend_name=backend_name)
             self.xp = config.xp
 
-            self.optimizer = self.make_layer(
+            self.optimizer = self.make_component(
                 Optimizer_Class,
                 learning_rate=self.LR,
                 decay=self.DECAY,
@@ -35,7 +35,10 @@ def make_suite(backend_name, Optimizer_Class):
             )
 
             self.layer = self.make_built_layer(
-                Dense, n_inputs=self.N_INPUTS, n_neurons=self.N_NEURONS
+                Dense,
+                input_shape=(self.N_INPUTS,),
+                n_inputs=self.N_INPUTS,
+                n_neurons=self.N_NEURONS,
             )
             self.layer.dweights = self.xp.random.randn(*self.layer.weights.shape).astype(
                 self.xp.float32
@@ -50,15 +53,22 @@ def make_suite(backend_name, Optimizer_Class):
                 self.optimizer._compile_for_device(backend_name)
 
         def make_layer_and_optimizer(self, Layer_Class, Optimizer_Class, xp):
-            layer = Layer_Class(
-                in_channels=1, out_channels=2, filter_size=(3, 3),
-                stride=(1, 1), padding="same",
+            layer = self.make_built_layer(
+                Layer_Class,
+                input_shape=(8, 8, 1),
+                in_channels=1,
+                out_channels=2,
+                filter_size=(3, 3),
+                stride=(1, 1),
+                padding="same",
             )
-            layer.build()
             if hasattr(layer, "_compile_for_device"):
                 layer._compile_for_device(backend_name)
 
-            optimizer = Optimizer_Class(learning_rate=0.01)
+            optimizer = self.make_component(
+                Optimizer_Class,
+                learning_rate=0.01,
+            )
             optimizer.init_params([layer])
             if hasattr(optimizer, "_compile_for_device"):
                 optimizer._compile_for_device(backend_name)
@@ -69,9 +79,15 @@ def make_suite(backend_name, Optimizer_Class):
 
         def test_init_params_allocates_momentum_and_cache_buffers(self):
             """init_params should pre-allocate weight/bias momentum and cache in float32."""
-            fresh_optimizer = Optimizer_Class(learning_rate=self.LR)
+            fresh_optimizer = self.make_component(
+                Optimizer_Class,
+                learning_rate=self.LR,
+            )
             fresh_layer = self.make_built_layer(
-                Dense, n_inputs=self.N_INPUTS, n_neurons=self.N_NEURONS
+                Dense,
+                input_shape=(self.N_INPUTS,),
+                n_inputs=self.N_INPUTS,
+                n_neurons=self.N_NEURONS,
             )
 
             self.assertFalse(hasattr(fresh_layer, "weight_momentums"))
@@ -121,7 +137,10 @@ def make_suite(backend_name, Optimizer_Class):
         def test_biasless_layer_support(self):
             """Optimizer should update weights seamlessly without crashing when biases are absent."""
             biasless_layer = self.make_built_layer(
-                Dense, n_inputs=self.N_INPUTS, n_neurons=self.N_NEURONS
+                Dense,
+                input_shape=(self.N_INPUTS,),
+                n_inputs=self.N_INPUTS,
+                n_neurons=self.N_NEURONS,
             )
             biasless_layer.biases = None
             biasless_layer.dbiases = None
@@ -129,7 +148,10 @@ def make_suite(backend_name, Optimizer_Class):
                 biasless_layer.weights, dtype=self.xp.float32
             )
 
-            optimizer = Optimizer_Class(learning_rate=0.01)
+            optimizer = self.make_component(
+                Optimizer_Class,
+                learning_rate=0.01,
+            )
             optimizer.init_params([biasless_layer])
             if hasattr(optimizer, "_compile_for_device"):
                 optimizer._compile_for_device(backend_name)
@@ -144,7 +166,11 @@ def make_suite(backend_name, Optimizer_Class):
 
         def test_step_applies_decay_and_increments_iterations(self):
             """step() should decay current_learning_rate and increment iterations atomically."""
-            decayed_optimizer = Optimizer_Class(learning_rate=0.1, decay=0.01)
+            decayed_optimizer = self.make_component(
+                Optimizer_Class,
+                learning_rate=0.1,
+                decay=0.01,
+            )
             decayed_optimizer.init_params([self.layer])
             if hasattr(decayed_optimizer, "_compile_for_device"):
                 decayed_optimizer._compile_for_device(backend_name)
@@ -238,11 +264,19 @@ def make_suite(backend_name, Optimizer_Class):
             if backend_name != "cupy":
                 self.skipTest("GPU kernel test is only applicable to CuPy backend.")
 
-            layer = self.make_built_layer(Dense, n_inputs=2, n_neurons=2)
+            layer = self.make_built_layer(
+                Dense,
+                input_shape=(2,),
+                n_inputs=2,
+                n_neurons=2,
+            )
             layer.dweights = self.xp.ones(layer.weights.shape, dtype=self.xp.float32)
             layer.dbiases = self.xp.ones(layer.biases.shape, dtype=self.xp.float32)
 
-            optimizer = Optimizer_Class(learning_rate=0.01)
+            optimizer = self.make_component(
+                Optimizer_Class,
+                learning_rate=0.01,
+            )
             optimizer.init_params([layer])
             optimizer._compile_for_device("cupy")
 

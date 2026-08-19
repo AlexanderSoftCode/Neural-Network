@@ -20,7 +20,9 @@ def make_suite(backend_name, Layer_Class):
         def setUp(self):
             config.set_backend(backend_name=backend_name)
             self.xp = config.xp
-            self.layer = self.make_layer(Layer_Class)
+            self.layer = self.make_component(
+                Layer_Class,
+            )
 
         # ---------------------------------------------------------------
         # Forward
@@ -71,7 +73,10 @@ def make_suite(backend_name, Layer_Class):
 
         def test_forward_label_smoothing_increases_loss_on_confident_prediction(self):
             """Label smoothing should raise the loss for an otherwise near-zero-loss prediction."""
-            smoothed = self.make_layer(Layer_Class, label_smoothing=0.1)
+            smoothed = self.make_component(
+                Layer_Class, 
+                label_smoothing=0.1,
+            )
 
             y_pred = self.xp.array([[0.98, 0.01, 0.01]], dtype=self.xp.float32)
             y_true = self.xp.array([0])
@@ -83,7 +88,10 @@ def make_suite(backend_name, Layer_Class):
 
         def test_forward_label_smoothing_ignored_when_not_training(self):
             """Label smoothing must not apply during eval/inference."""
-            smoothed = self.make_layer(Layer_Class, label_smoothing=0.1)
+            smoothed = self.make_component(
+                Layer_Class, 
+                label_smoothing=0.1,
+            )
 
             y_pred = self.xp.array([[0.98, 0.01, 0.01]], dtype=self.xp.float32)
             y_true = self.xp.array([0])
@@ -167,7 +175,10 @@ def make_suite(backend_name, Layer_Class):
         def test_backward_numerical_gradient_check_with_label_smoothing(self):
             """Same finite-difference check, but with label smoothing engaged on both passes."""
             epsilon = 1e-4
-            smoothed = self.make_layer(Layer_Class, label_smoothing=0.1)
+            smoothed = self.make_component(
+                Layer_Class, 
+                label_smoothing=0.1,
+            )
 
             y_pred = self.xp.array([
                 [0.55, 0.35, 0.10],

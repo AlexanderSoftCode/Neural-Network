@@ -19,17 +19,18 @@ def make_suite(backend_name, Layer_Class):
         FILTER_SIZE = (2, 2)
         STRIDE = (2, 2)
         PADDING = 'valid'
-        
+        INPUT_SHAPE = (2, 28, 28, 1)
         def setUp(self):
             self.backend_name = backend_name
             config.set_backend(backend_name=self.backend_name)
             self.xp = config.xp
             self.as_strided = config.get_stride_utility(self.xp)
-            self.test_images = self.xp.random.randn(2, 28, 28, 1)
+            self.test_images = self.xp.random.randn(*self.INPUT_SHAPE)
 
-            self.layer = self.make_layer(
-                Layer_Class, filter_size=self.FILTER_SIZE,
-                stride=self.STRIDE, padding=self.PADDING,
+            self.layer = self.make_built_layer(
+                Layer_Class, 
+                input_shape=self.INPUT_SHAPE[1:], 
+                filter_size=self.FILTER_SIZE, stride=self.STRIDE, padding=self.PADDING,
             )
 
         # ---- forward pass --------------------------------
@@ -44,8 +45,11 @@ def make_suite(backend_name, Layer_Class):
             on an input whose spatial size is not evenly divisible by the
             stride, so the ceil-based 'same' output size actually differs
             from the 'valid' calculation."""
-            layer = self.make_layer(Layer_Class, filter_size=self.FILTER_SIZE, stride=self.STRIDE,
-                                    padding='same')
+            layer = self.make_built_layer(
+                Layer_Class, 
+                input_shape=self.INPUT_SHAPE[1:], 
+                filter_size=self.FILTER_SIZE, stride=self.STRIDE, padding='same')
+
             inputs = self.xp.random.randn(2, 7, 7, 3)
             output = layer.forward(inputs, training=True)
             # H_out = ceil(7 / 2) = 4
@@ -53,8 +57,11 @@ def make_suite(backend_name, Layer_Class):
 
         def test_forward_max_known_values(self):
             """Verify max pooling selects the correct maximum from each window."""
-            layer = self.make_layer(Layer_Class, filter_size=(2, 2), stride=(2, 2),
-                                    padding='valid')
+            layer = self.make_built_layer(
+                Layer_Class, 
+                input_shape=(4,4,1), 
+                filter_size=(2, 2), stride=(2, 2), padding='valid')
+
             inputs = self.xp.arange(16, dtype=self.xp.float32).reshape(1, 4, 4, 1)
             # [[ 0  1  2  3]
             #  [ 4  5  6  7]
@@ -69,15 +76,19 @@ def make_suite(backend_name, Layer_Class):
 
         def test_forward_max_same_padding_preserves_expected_dimensions(self):
             """With stride 1, 'same' padding should preserve spatial dimensions."""
-            layer = self.make_layer(Layer_Class, filter_size=(3, 3), stride=(1, 1),
-                                    padding='same')
+            layer = self.make_built_layer(
+                Layer_Class,
+                input_shape=self.INPUT_SHAPE[1:],
+                filter_size=(3, 3), stride=(1, 1), padding='same')
             output = layer.forward(self.test_images, training=True)
             self.assertEqual(output.shape, (2, 28, 28, 1))
 
         def test_forward_max_valid_padding_reduces_dimensions(self):
             """With stride 1, 'valid' padding should shrink the spatial dimensions."""
-            layer = self.make_layer(Layer_Class, filter_size=(3, 3), stride=(1, 1),
-                                    padding='valid')
+            layer = self.make_built_layer(
+                Layer_Class, 
+                input_shape=self.INPUT_SHAPE[1:],
+                filter_size=(3, 3), stride=(1, 1), padding='valid')
             output = layer.forward(self.test_images, training=True)
             # (28 - 3) / 1 + 1 = 26
             self.assertEqual(output.shape, (2, 26, 26, 1))
@@ -91,8 +102,10 @@ def make_suite(backend_name, Layer_Class):
 
         def test_backward_max_non_overlapping_same(self):
             """Exercise self.strides == self.filter_size branch using 'same'"""
-            layer = self.make_layer(Layer_Class, filter_size=self.FILTER_SIZE, stride=self.STRIDE,
-                                    padding='same')
+            layer = self.make_built_layer(
+                Layer_Class, 
+                input_shape=(7, 7, 1),
+                filter_size=self.FILTER_SIZE, stride=self.STRIDE, padding='same')
             # Use a spatial size that is NOT evenly divisible by the stride so
             # 'same' padding actually inserts real padding, properly
             # exercising the crop-back-to-input-size logic in backward().
@@ -105,8 +118,10 @@ def make_suite(backend_name, Layer_Class):
         def test_backward_max_routes_gradient_to_maximum(self):
             """ ensure only maximum element in each pooling window recieves the upstream
             graidnet"""
-            layer = self.make_layer(Layer_Class, filter_size=self.FILTER_SIZE, stride=self.STRIDE,
-                                    padding='valid')
+            layer = self.make_built_layer(
+                Layer_Class, 
+                input_shape=(4,4,1),
+                filter_size=self.FILTER_SIZE, stride=self.STRIDE, padding='valid')
             inputs = self.xp.arange(16, dtype=self.xp.float32).reshape(1, 4, 4, 1)
             layer.forward(inputs, training=True)
 
@@ -129,24 +144,30 @@ def make_suite(backend_name, Layer_Class):
         # ---- Backward Pass Max Pooling Overlapping Windows ----
 
         def test_backward_max_overlapping_valid(self):
-            layer = self.make_layer(Layer_Class, filter_size=(3, 3), stride=(2, 2),
-                                    padding='valid')
+            layer = self.make_built_layer(
+                Layer_Class, 
+                input_shape=self.INPUT_SHAPE[1:],
+                filter_size=(3, 3), stride=(2, 2), padding='valid')
             output = layer.forward(self.test_images, training=True)
             dvalues = self.xp.random.randn(*output.shape)
             dinputs = layer.backward(dvalues)
             self.assertEqual(dinputs.shape, self.test_images.shape)
 
         def test_backward_max_overlapping_same(self):
-            layer = self.make_layer(Layer_Class, filter_size=(3, 3), stride=(2, 2),
-                                    padding='same')
+            layer = self.make_built_layer(
+                Layer_Class, 
+                input_shape=self.INPUT_SHAPE[1:],
+                filter_size=(3, 3), stride=(2, 2), padding='same')
             output = layer.forward(self.test_images, training=True)
             dvalues = self.xp.random.randn(*output.shape)
             dinputs = layer.backward(dvalues)
             self.assertEqual(dinputs.shape, self.test_images.shape)
 
         def test_backward_max_overlapping_accumulates_gradients(self):
-            layer = self.make_layer(Layer_Class, filter_size=(2, 2), stride=(1, 1),
-                                    padding='valid')
+            layer = self.make_built_layer(
+                Layer_Class, 
+                input_shape=(1, 3, 3),
+                filter_size=(2, 2), stride=(1, 1), padding='valid')
             # Center pixel is the maximum of every overlapping window that covers it
             inputs = self.xp.array(
                 [[[[1.], [1.], [1.]],
@@ -169,8 +190,8 @@ def make_suite(backend_name, Layer_Class):
         def test_forward_asymmetric_filter_and_stride(self):
             """Verify output dimensions and correctness when height and width 
             filters/strides are asymmetric."""
-            layer = self.make_layer(
-                Layer_Class, filter_size=(3, 2), stride=(2, 1), padding='valid'
+            layer = self.make_built_layer(
+                Layer_Class, input_shape=(7, 5, 1), filter_size=(3, 2), stride=(2, 1), padding='valid'
             )
             inputs = self.xp.arange(1, 36, dtype=self.xp.float32).reshape(1, 7, 5, 1)
             output = layer.forward(inputs, training=True)
@@ -192,7 +213,7 @@ def make_suite(backend_name, Layer_Class):
             cpu_out = cpu_layer.forward(raw_input, training=True)
 
             config.set_backend('cupy')
-            gpu_layer = self.make_layer(Layer_Class, filter_size=(2, 2), stride=(2, 2), padding='valid')
+            gpu_layer = self.make_built_layer(Layer_Class, input_shape=(6, 6, 2), filter_size=(2, 2), stride=(2, 2), padding='valid')
             gpu_out = gpu_layer.forward(self.xp.array(raw_input), training=True)
 
             self.xp.testing.assert_array_almost_equal(gpu_out, self.xp.array(cpu_out), decimal=5)
@@ -222,8 +243,8 @@ def make_suite(backend_name, Layer_Class):
 
         def test_same_padding_boundary_scaling(self):
             """Verify boundary max pooling behavior under 'same' padding on non-divisible inputs."""
-            layer = self.make_layer(
-                Layer_Class, filter_size=(2, 2), stride=(2, 2), padding='same'
+            layer = self.make_built_layer(
+                Layer_Class, input_shape=(3, 3, 1), filter_size=(2, 2), stride=(2, 2), padding='same'
             )
             inputs = self.xp.ones((1, 3, 3, 1), dtype=self.xp.float32)
             output = layer.forward(inputs, training=True)
@@ -232,11 +253,13 @@ def make_suite(backend_name, Layer_Class):
 
         # ---- Validation/Error Handling ----------------------
 
-        def test_forward_invalid_padding_raises_value_error(self):
-            layer = self.make_layer(Layer_Class, filter_size=(2, 2), stride=(2, 2),
-                                    padding='not_a_real_padding')
+        def test_build_invalid_padding_raises_value_error(self):
             with self.assertRaises(ValueError):
-                layer.forward(self.test_images, training=True)
+                layer = self.make_built_layer(
+                    Layer_Class, 
+                    input_shape=self.INPUT_SHAPE[1:], 
+                    filter_size=(2, 2), stride=(2, 2),
+                    padding='not_a_real_padding')
 
         def test_forward_invalid_input_rank_raises_value_error(self):
             bad_inputs = self.xp.random.randn(28, 28, 1)  # missing batch dim
@@ -248,7 +271,7 @@ def make_suite(backend_name, Layer_Class):
         def test_backward_max_numerical_gradient(self):
             """Compare analytical vs numerical using limit def"""
             epsilon = 1e-2
-            layer = self.make_layer(Layer_Class, filter_size=(2, 2), stride=(2, 2),
+            layer = self.make_built_layer(Layer_Class, input_shape=(4, 4, 1), filter_size=(2, 2), stride=(2, 2),
                                     padding='valid')
 
             fixed_input = self.xp.random.randn(2, 4, 4, 1).astype(dtype=self.xp.float32)

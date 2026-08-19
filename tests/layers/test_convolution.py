@@ -18,6 +18,7 @@ def make_suite(backend_name, Layer_Class):
     class_name = f"Test_{TARGET_LAYER.__name__}_{backend_name.upper()}"
     class TestConvLayer(AetherBaseLayerTestCase):
         SEED = 42
+        CONV_SHAPE = (2, 28, 28, 1)
         IN_CHANNELS=1
         OUT_CHANNELS=4
         FILTER_SIZE=(3,3)
@@ -32,6 +33,7 @@ def make_suite(backend_name, Layer_Class):
             
             self.layer = self.make_built_layer(
                 Layer_Class, 
+                input_shape= self.CONV_SHAPE[1:],
                 seed=self.SEED,
                 in_channels=self.IN_CHANNELS, 
                 out_channels=self.OUT_CHANNELS, 
@@ -40,7 +42,7 @@ def make_suite(backend_name, Layer_Class):
                 padding=self.PADDING
             )
             #Dummy image, batch of 2, 28x28 pixels, 1 channel
-            self.test_images = self.xp.random.randn(2, 28, 28, 1)
+            self.test_images = self.xp.random.randn(*self.CONV_SHAPE)
 
         def test_conv_forward_shape(self):
             """Verify output dimensions based on padding and stride"""
@@ -65,7 +67,8 @@ def make_suite(backend_name, Layer_Class):
         def test_conv_same_padding_stride(self):
             # 28x28 input, 3x3 filter, stride=(2,2), padding='same'
             layer = self.make_built_layer(
-                Layer_Class, 
+                Layer_Class,
+                input_shape = self.CONV_SHAPE[1:],
                 in_channels=self.IN_CHANNELS, 
                 out_channels=self.OUT_CHANNELS, 
                 filter_size=self.FILTER_SIZE,
@@ -81,6 +84,7 @@ def make_suite(backend_name, Layer_Class):
             # 28x28 input, 3x3 filter, stride = (2,2), valid padding
             layer = self.make_built_layer(
                 Layer_Class, 
+                input_shape = self.CONV_SHAPE[1:],
                 in_channels=self.IN_CHANNELS, 
                 out_channels=self.OUT_CHANNELS, 
                 filter_size=self.FILTER_SIZE,
@@ -108,6 +112,7 @@ def make_suite(backend_name, Layer_Class):
 
             layer = self.make_built_layer(
                 Layer_Class,
+                input_shape = self.CONV_SHAPE[1:],
                 in_channels=self.IN_CHANNELS,
                 out_channels=self.OUT_CHANNELS,
                 filter_size=self.FILTER_SIZE,
@@ -121,6 +126,7 @@ def make_suite(backend_name, Layer_Class):
         def test_conv_stride_width(self):
             layer = self.make_built_layer(
                 Layer_Class,
+                input_shape = self.CONV_SHAPE[1:],
                 in_channels=self.IN_CHANNELS,
                 out_channels=self.OUT_CHANNELS,
                 filter_size=self.FILTER_SIZE,
@@ -134,6 +140,7 @@ def make_suite(backend_name, Layer_Class):
             """Verify forward pass with multi-channel input (e.g., RGB with C_in=3)"""
             layer = self.make_built_layer(
                 Layer_Class,
+                input_shape = self.CONV_SHAPE[1:],
                 in_channels=3,
                 out_channels=8,
                 filter_size=self.FILTER_SIZE,
@@ -158,6 +165,7 @@ def make_suite(backend_name, Layer_Class):
             """Verify rectangular filter geometries such as (5, 3)"""
             layer = self.make_built_layer(
                 Layer_Class,
+                input_shape = self.CONV_SHAPE[1:],
                 in_channels=self.IN_CHANNELS,
                 out_channels=self.OUT_CHANNELS,
                 filter_size=(5, 3),
@@ -188,8 +196,8 @@ def make_suite(backend_name, Layer_Class):
             )
 
             seed_val = 123
-            layer_1.build(seed=seed_val)
-            layer_2.build(seed=seed_val)
+            layer_1.build(input_shape = self.CONV_SHAPE[1:], seed=seed_val)
+            layer_2.build(input_shape = self.CONV_SHAPE[1:], seed=seed_val)
 
             # Weights and biases must match exactly bit-for-bit on the active backend
             self.xp.testing.assert_array_equal(
@@ -218,8 +226,8 @@ def make_suite(backend_name, Layer_Class):
                 padding=self.PADDING
             )
 
-            layer_1.build(seed=123)
-            layer_2.build(seed=456)
+            layer_1.build(input_shape=self.CONV_SHAPE[1:], seed=123)
+            layer_2.build(input_shape=self.CONV_SHAPE[1:], seed=456)
 
             # Weights should not be identical
             self.assertFalse(
@@ -246,7 +254,7 @@ def make_suite(backend_name, Layer_Class):
                 stride=self.STRIDE,
                 padding=self.PADDING
             )
-            throwaway_layer.build(seed=123)
+            throwaway_layer.build(input_shape = self.CONV_SHAPE[1:], seed=123)
 
             val_after = float(xp.random.randn(1)[0])
 
@@ -268,7 +276,7 @@ def make_suite(backend_name, Layer_Class):
                 stride=self.STRIDE,
                 padding=self.PADDING
             )
-            layer_1.build(seed=None)
+            layer_1.build(input_shape = self.CONV_SHAPE[1:], seed=None)
 
             xp.random.seed(777)
             layer_2 = Layer_Class(
@@ -278,7 +286,7 @@ def make_suite(backend_name, Layer_Class):
                 stride=self.STRIDE,
                 padding=self.PADDING
             )
-            layer_2.build(seed=None)
+            layer_2.build(input_shape = self.CONV_SHAPE[1:], seed=None)
 
             self.xp.testing.assert_array_equal(
                 layer_1.weights,
@@ -296,6 +304,7 @@ def make_suite(backend_name, Layer_Class):
             epsilon = 1e-2
             layer = self.make_built_layer(
                 Layer_Class,
+                input_shape = (8, 8, 1),
                 in_channels=self.IN_CHANNELS,
                 out_channels=2,
                 filter_size=self.FILTER_SIZE,
@@ -390,6 +399,7 @@ def make_suite(backend_name, Layer_Class):
 
             layer = self.make_built_layer(
                 Layer_Class,
+                input_shape = (8, 8, self.IN_CHANNELS),
                 in_channels=self.IN_CHANNELS,
                 out_channels=2,
                 filter_size=self.FILTER_SIZE,
@@ -423,6 +433,7 @@ def make_suite(backend_name, Layer_Class):
 
             layer = self.make_built_layer(
                 Layer_Class,
+                input_shape = (8, 8, self.IN_CHANNELS),
                 in_channels=self.IN_CHANNELS,
                 out_channels=2,
                 filter_size=self.FILTER_SIZE,
@@ -456,6 +467,7 @@ def make_suite(backend_name, Layer_Class):
 
             layer = self.make_built_layer(
                 Layer_Class,
+                input_shape = (8, 8, self.IN_CHANNELS),
                 in_channels=self.IN_CHANNELS,
                 out_channels=2,
                 filter_size=self.FILTER_SIZE,

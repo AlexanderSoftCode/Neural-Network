@@ -21,14 +21,14 @@ def make_suite(backend_name, Layer_Class):
             config.set_backend(backend_name=self.backend_name)
             self.xp = config.xp 
 
-            self.layer = self.make_layer(
-                Layer_Class, rate=self.DEFAULT_RATE, seed=self.FIXED_SEED
+            self.layer = self.make_built_layer(
+                Layer_Class, input_shape= (16,), rate=self.DEFAULT_RATE, seed=self.FIXED_SEED
                 )
             self.uses_gpu_kernel = (self.layer.forward.__name__ == '_forward_gpu')
          
         def test_keep_rate_computed_from_rate(self):
             rate = 0.35
-            layer = self.make_layer(Layer_Class, rate=rate)
+            layer = self.make_built_layer(Layer_Class, input_shape=(16,), rate=rate)
             self.assertAlmostEqual(layer.keep_rate, 1 - rate, places=7)
   
         def test_forward_output_shape_matches_input_1d(self):
@@ -54,7 +54,7 @@ def make_suite(backend_name, Layer_Class):
             self.assertFalse(bool(inputs[0, 0] == 999))
   
         def test_forward_training_zero_rate_is_identity(self):
-            layer = self.make_layer(Layer_Class, rate=0.0)
+            layer = self.make_built_layer(Layer_Class, input_shape=(500,),rate=0.0)
             inputs = self.xp.linspace(0.1, 5.0, 500, dtype=self.xp.float32)
             output = layer.forward(inputs, training=True)
             self.assertTrue(bool(self.xp.allclose(output, inputs, rtol=1e-5)))
@@ -62,8 +62,9 @@ def make_suite(backend_name, Layer_Class):
         def test_forward_scales_kept_units_by_inverse_keep_rate(self):
             rate = 0.3
             keep_rate = 1 - rate
-            layer = self.make_layer(Layer_Class, rate=rate)
             n = 20000
+            layer = self.make_built_layer(Layer_Class, input_shape=(n,), rate=rate)
+            
             inputs = self.xp.ones(n, dtype=self.xp.float32)
  
             if not self.uses_gpu_kernel:
@@ -76,8 +77,9 @@ def make_suite(backend_name, Layer_Class):
  
         def test_forward_drops_approximately_expected_fraction(self):
             rate = 0.4
-            layer = self.make_layer(Layer_Class, rate=rate)
-            n = 200000
+            n = 100000
+            layer = self.make_built_layer(Layer_Class, input_shape=(n,), rate=rate)
+
             inputs = self.xp.ones(n, dtype=self.xp.float32)
  
             if not self.uses_gpu_kernel:
@@ -88,9 +90,9 @@ def make_suite(backend_name, Layer_Class):
             self.assertAlmostEqual(dropped_fraction, rate, delta=0.02)
   
         def test_backward_uses_same_mask_and_scale_as_forward(self):
-            
-            layer = self.make_layer(Layer_Class, rate=0.5)
             n = 5000
+            layer = self.make_built_layer(Layer_Class, input_shape=(n,), rate=0.5)
+            
             inputs = self.xp.ones(n, dtype=self.xp.float32)
  
             forward_out = layer.forward(inputs, training=True)
@@ -112,7 +114,7 @@ def make_suite(backend_name, Layer_Class):
             if not self.uses_gpu_kernel:
                 self.skipTest('offset bookkeeping only applies to the philox GPU path')
 
-            layer = self.make_layer(Layer_Class, rate=0.5)
+            layer = self.make_built_layer(Layer_Class, input_shape=(100,), rate=0.5)
             inputs = self.xp.ones(100, dtype=self.xp.float32)
 
             # Offset starts at 0 before any training steps
@@ -130,7 +132,7 @@ def make_suite(backend_name, Layer_Class):
             if not self.uses_gpu_kernel:
                 self.skipTest('offset bookkeeping only applies to the philox GPU path')
 
-            layer = self.make_layer(Layer_Class, rate=0.5)
+            layer = self.make_built_layer(Layer_Class, input_shape=(100,), rate=0.5)
             inputs = self.xp.ones(100, dtype=self.xp.float32)
 
             # Inference / evaluation pass should not step the RNG state

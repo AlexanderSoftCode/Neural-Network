@@ -21,7 +21,7 @@ def make_suite(backend_name, Layer_Class):
             config.set_backend(backend_name=self.backend_name)
             self.xp = config.xp
 
-            self.layer = self.make_layer(Layer_Class)
+            self.layer = self.make_built_layer(Layer_Class, input_shape=(4,))
 
         def test_forward_probabilities(self):
             """Verify SoftMax bounds values between 0 and 1, and rows sum to 1.0."""
@@ -40,39 +40,43 @@ def make_suite(backend_name, Layer_Class):
 
         def test_numerical_stability(self):
             """Verify that extreme logit input scales do not explode or result in NaNs."""
+            layer = self.make_built_layer(Layer_Class, input_shape=(3,))
             extreme_inputs = self.xp.array([
                 [1000.0, 1000.0, 1000.0],
                 [-1000.0, -1000.0, 0.0]
             ], dtype=self.xp.float32)
             
-            output = self.layer.forward(extreme_inputs, training=True)
+            output = layer.forward(extreme_inputs, training=True)
             
             self.assertFalse(self.xp.isnan(output).any(), "SoftMax suffered an unmitigated NaN explosion!")
             self.assertFalse(self.xp.isinf(output).any(), "SoftMax suffered an overflow infinity leak!")
 
         def test_forward_does_not_mutate_inputs(self):
             """Ensure forward pass does not modify incoming inputs in-place."""
+            layer = self.make_built_layer(Layer_Class, input_shape=(3,))
             inputs = self.xp.array([[1.0, 2.0, 3.0]], dtype=self.xp.float32)
             original_inputs = inputs.copy()
 
-            self.layer.forward(inputs, training=True)
+            layer.forward(inputs, training=True)
 
             self.xp.testing.assert_array_equal(inputs, original_inputs)
 
         def test_backward_does_not_mutate_dvalues(self):
             """Ensure backward pass does not modify incoming upstream gradients in-place."""
+            layer = self.make_built_layer(Layer_Class, input_shape=(3,))
             inputs = self.xp.array([[1.0, 2.0, 3.0]], dtype=self.xp.float32)
-            self.layer.forward(inputs, training=True)
+            layer.forward(inputs, training=True)
 
             dvalues = self.xp.array([[0.1, -0.2, 0.1]], dtype=self.xp.float32)
             original_dvalues = dvalues.copy()
 
-            self.layer.backward(dvalues)
+            layer.backward(dvalues)
 
             self.xp.testing.assert_array_equal(dvalues, original_dvalues)
             
         def test_single_sample_batch_size_one(self):
             """Ensure layer handles single-instance mini-batches correctly."""
+            layer = self.make_built_layer(Layer_Class, input_shape=(3,))
             inputs = self.xp.array([[0.5, 1.5, -0.5]], dtype=self.xp.float32)
             output = self.layer.forward(inputs, training=False)
 
@@ -81,13 +85,13 @@ def make_suite(backend_name, Layer_Class):
 
         def test_analytical_gradients_limit_definition(self):
             """Validate isolated SoftMax backpropagation against centered finite differences."""
-
+            layer = self.make_built_layer(Layer_Class, input_shape =(3,))
             inputs = self.xp.array([[1.5, 2.5, 0.5], [0.1, -1.2, 3.3]], dtype=self.xp.float32)
             upstream_dvalues = self.xp.array([[0.5, -0.2, 0.1], [1.0, 0.0, -0.5]], dtype=self.xp.float32)
             
-            self.layer.forward(inputs, training=True)
-            self.layer.backward(upstream_dvalues)
-            analytical_dinputs = self.layer.dinputs
+            layer.forward(inputs, training=True)
+            layer.backward(upstream_dvalues)
+            analytical_dinputs = layer.dinputs
             
             epsilon = 1e-4
             numerical_dinputs = self.xp.zeros_like(inputs)

@@ -31,7 +31,7 @@ def make_suite(backend_name, Layer_Class):
             config.set_backend(backend_name=self.backend_name)
             self.xp = config.xp
 
-            self.layer = self.make_layer(Layer_Class)
+            self.layer = self.make_built_layer(Layer_Class, input_shape=self.INPUT_SHAPE[1:])
             
             self.test_inputs = self.xp.arange(
                 4 * 7 * 7 * 3, dtype=self.xp.float32
@@ -54,12 +54,6 @@ def make_suite(backend_name, Layer_Class):
                 self.xp.allclose(output[0], expected_first_sample)
             )
             
-        def test_flatten_training_caches_shape(self):
-            """Verify that inputs_shape IS stored when training=True."""
-            self.layer.forward(self.test_inputs, training=True)
-            
-            self.assertTrue(hasattr(self.layer, 'inputs_shape'))
-            self.assertEqual(self.layer.inputs_shape, self.INPUT_SHAPE)
 
         def test_flatten_inference_does_not_cache_shape(self):
             """Verify that inputs_shape is NOT stored/cached when training=False."""

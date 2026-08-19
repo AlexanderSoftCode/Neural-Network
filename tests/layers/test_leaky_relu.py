@@ -22,7 +22,7 @@ def make_suite(backend_name, Layer_Class):
             config.set_backend(backend_name=self.backend_name)
             self.xp = config.xp
 
-            self.layer = self.make_layer(Layer_Class, alpha=self.ALPHA)
+            self.layer = self.make_built_layer(Layer_Class, input_shape=(3,), alpha=self.ALPHA)
                     
         def test_forward_pass(self):
             """Verify output values for leaky_ReLU"""            
@@ -88,7 +88,7 @@ def make_suite(backend_name, Layer_Class):
             current_backward_name = self.layer.backward.__name__
 
             if backend_name == 'cupy':
-                # Assert that the pointers have swapped to the ultra-fast fused GPU variants
+                # Assert that the pointers have swapped to the faster fused GPU variants
                 self.assertEqual(
                     current_forward_name, "_forward_gpu",
                     msg="CuPy backend failed to bind the optimized GPU forward pointer."
@@ -110,6 +110,7 @@ def make_suite(backend_name, Layer_Class):
         
         def test_gradient_memory_safety(self):
             """ Verify backward pass does not alter the incoming dvalues tensor in-place."""
+            layer = self.make_built_layer(Layer_Class, input_shape=(4,), alpha=self.ALPHA)
             inputs = self.xp.array([
                 [-2.0, 0.0, 1.0, 3.0],
                 [ 0.5, -1.0, 2.0, -0.5]
@@ -121,8 +122,8 @@ def make_suite(backend_name, Layer_Class):
             ], dtype=self.xp.float32)
 
             desired_dvalues = dvalues.copy()
-            self.layer.forward(inputs, training=False)
-            self.layer.backward(dvalues)
+            layer.forward(inputs, training=False)
+            layer.backward(dvalues)
 
             self.xp.testing.assert_array_equal(
                 desired_dvalues,
@@ -133,7 +134,7 @@ def make_suite(backend_name, Layer_Class):
         def test_custom_alpha_scaling(self):
             """Verify hyperparameter integrity"""
             custom_alpha = 0.25
-            custom_layer = self.make_layer(Layer_Class, alpha=custom_alpha)
+            custom_layer = self.make_built_layer(Layer_Class, input_shape=(2,), alpha=custom_alpha)
             inputs = self.xp.array([[-2.0, -4.0]], dtype=self.xp.float32)
             expected_output = self.xp.array([[-0.5, -1.0]], dtype=self.xp.float32)
 

@@ -26,8 +26,10 @@ def make_suite(backend_name, Layer_Class):
 
             # Grab extra utility imports for specific backend if needed
             self.as_strided = config.get_stride_utility(self.xp)
-            self.layer = self.make_layer(Layer_Class, filter_size=self.FILTER_SIZE,
-                stride=self.STRIDE, padding=self.PADDING
+            self.layer = self.make_built_layer(
+                Layer_Class, 
+                input_shape=(28, 28, 1), 
+                filter_size=self.FILTER_SIZE, stride=self.STRIDE, padding=self.PADDING,
             )
             self.test_images = self.xp.random.randn(2, 28, 28, 1)
 
@@ -39,8 +41,10 @@ def make_suite(backend_name, Layer_Class):
         def test_forward_average_same_shape(self):
             """Verify output dimensions for average pooling with 'same' padding
             on a non-evenly-divisible input."""
-            layer = self.make_layer(Layer_Class, filter_size=self.FILTER_SIZE,
-                stride=self.STRIDE, padding="same"
+            layer = self.make_built_layer(
+                Layer_Class, 
+                input_shape=(7, 7, 3), 
+                filter_size=self.FILTER_SIZE, stride=self.STRIDE, padding="same",
             )
             inputs = self.xp.random.randn(2, 7, 7, 3)
             output = layer.forward(inputs, training=True)
@@ -75,8 +79,11 @@ def make_suite(backend_name, Layer_Class):
         def test_backward_average_even_gradient_distribution(self):
             """Each element inside a non-overlapping average-pooling window should
             receive an equal share (dvalue / window_size) of the upstream gradient."""
-            layer = Layer_Class(filter_size=(2, 2), stride=(2, 2),
-                                 padding='valid')
+            layer = self.make_built_layer(
+                Layer_Class, 
+                input_shape=(4, 4, 1), 
+                filter_size=(2, 2), stride=(2, 2), padding='valid',
+            )
             inputs = self.xp.arange(16, dtype=self.xp.float32).reshape(1, 4, 4, 1)
             layer.forward(inputs, training=True)
 
@@ -97,8 +104,10 @@ def make_suite(backend_name, Layer_Class):
         # ---- Backward pass Average Pooling Overlapping Windows
 
         def test_backward_average_overlapping_valid(self):
-            layer = self.make_layer(Layer_Class, filter_size=(3,3),
-                stride=(3,3), padding=self.PADDING
+            layer = self.make_built_layer(
+                Layer_Class, 
+                input_shape=(28, 28, 1), 
+                filter_size=(3, 3), stride=(3, 3), padding=self.PADDING,
             )
             output = layer.forward(self.test_images, training=True)
             dvalues = self.xp.random.randn(*output.shape)
@@ -106,8 +115,11 @@ def make_suite(backend_name, Layer_Class):
             self.assertEqual(dinputs.shape, self.test_images.shape)
 
         def test_backward_average_overlapping_same(self):
-            layer = self.make_layer(Layer_Class, filter_size=(3,3),
-                            stride=(3,3), padding='same')
+            layer = self.make_built_layer(
+                Layer_Class, 
+                input_shape=(28, 28, 1), 
+                filter_size=(3, 3), stride=(3, 3), padding='same',
+            )
             output = layer.forward(self.test_images, training=True)
             dvalues = self.xp.random.randn(*output.shape)
             dinputs = layer.backward(dvalues)
@@ -116,8 +128,10 @@ def make_suite(backend_name, Layer_Class):
         def test_forward_asymmetric_filter_and_stride(self):
             """Verify output dimensions and correctness when height and width 
             filters/strides are asymmetric (e.g., filter_size=(3, 2), stride=(2, 1))."""
-            layer = self.make_layer(
-                Layer_Class, filter_size=(3, 2), stride=(2, 1), padding='valid'
+            layer = self.make_built_layer(
+                Layer_Class, 
+                input_shape=(7, 5, 1), 
+                filter_size=(3, 2), stride=(2, 1), padding='valid',
             )
             inputs = self.xp.arange(1, 36, dtype=self.xp.float32).reshape(1, 7, 5, 1)
             # Output height: (7 - 3) // 2 + 1 = 3
@@ -142,7 +156,11 @@ def make_suite(backend_name, Layer_Class):
             cpu_out = cpu_layer.forward(raw_input, training=True)
 
             config.set_backend('cupy')
-            gpu_layer = self.make_layer(Layer_Class, filter_size=(2, 2), stride=(2, 2), padding='valid')
+            gpu_layer = self.make_built_layer(
+                Layer_Class, 
+                input_shape=(6, 6, 2), 
+                filter_size=(2, 2), stride=(2, 2), padding='valid',
+            )
             gpu_out = gpu_layer.forward(self.xp.array(raw_input), training=True)
 
             self.xp.testing.assert_array_almost_equal(gpu_out, self.xp.array(cpu_out), decimal=5)
@@ -173,8 +191,10 @@ def make_suite(backend_name, Layer_Class):
 
         def test_same_padding_boundary_scaling(self):
             """Verify boundary pooling behavior under 'same' padding on non-divisible inputs."""
-            layer = self.make_layer(
-                Layer_Class, filter_size=(2, 2), stride=(2, 2), padding='same'
+            layer = self.make_built_layer(
+                Layer_Class, 
+                input_shape=(3, 3, 1), 
+                filter_size=(2, 2), stride=(2, 2), padding='same',
             )
             inputs = self.xp.ones((1, 3, 3, 1), dtype=self.xp.float32)
             output = layer.forward(inputs, training=True)
@@ -184,8 +204,10 @@ def make_suite(backend_name, Layer_Class):
         def test_backward_average_overlapping_gradient_accumulation(self):
             """When average-pooling windows overlap, an input cell shared by
             multiple windows should accumulate a contribution from each one."""
-            layer = self.make_layer(Layer_Class, filter_size=(2,2),
-                            stride=(1,1), padding=self.PADDING
+            layer = self.make_built_layer(
+                Layer_Class, 
+                input_shape=(3, 3, 1), 
+                filter_size=(2, 2), stride=(1, 1), padding=self.PADDING,
             )
             inputs = self.xp.random.randn(1, 3, 3, 1)
             layer.forward(inputs, training=True)

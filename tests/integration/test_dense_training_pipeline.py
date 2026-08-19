@@ -70,9 +70,9 @@ def make_suite(backend_name):
 
             self.assertFalse(bool(self.xp.allclose(row_sums, self.xp.ones_like(row_sums))))
 
-        def test_evaluate_and_train_auto_finalize_unfinalized_model(self):
-            """train()/evaluate()/predict() should transparently call finalize()
-            if the model hasn't been finalized yet."""
+        def test_unfinalized_model_raises_runtime_error_on_execution(self):
+            """train()/evaluate()/predict() should raise a RuntimeError
+            if the model has not been explicitly finalized with an input_shape."""
             import aether as ae
             model = ae.Model()
             model.add(ae.Flatten())
@@ -87,9 +87,14 @@ def make_suite(backend_name):
             model.to(backend_name)
 
             self.assertFalse(model.is_finalized)
-            model.train(X=self.X, y=self.y, epochs=1, batch_size=self.BATCH_SIZE,
-                        verbose=False, print_every=10 ** 9)
-            self.assertTrue(model.is_finalized)
+            with self.assertRaises(RuntimeError):
+                model.train(X=self.X, y=self.y, epochs=1, batch_size=self.BATCH_SIZE, verbose=False)
+
+            with self.assertRaises(RuntimeError):
+                model.evaluate(self.X, self.y, batch_size=self.BATCH_SIZE, verbose=False)
+
+            with self.assertRaises(RuntimeError):
+                model.predict(self.X, batch_size=self.BATCH_SIZE)
 
         def test_loss_decreases_over_training_steps(self):
             """Composition-level check: forward -> loss -> backward -> optimizer,
