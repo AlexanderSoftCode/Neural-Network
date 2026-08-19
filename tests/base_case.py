@@ -41,21 +41,47 @@ class AetherBaseLayerTestCase(AetherBaseTestCase):
     """Base class for layers/activations/loss modules"""
     __test__ = False 
 
-    def make_layer(self, layer_cls, **kwargs):
-        """Construct a layer and, if it supports device compilation,
-        bind it to the currently active backend.
-        Requires self.backend_name to be set in setUp before use.
+    def make_built_layer(self, layer_cls, input_shape: tuple[int, ...], seed: int | None = None, **kwargs):
+        """Constructs, binds to the active device backend, and builds a layer instance.
+
+        This test helper standardizes the parameterized layer lifecycle by first
+        instantiating the layer, triggering device compilation/runtime pointer 
+        rebinding if supported, and finally executing the layer's build routine to 
+        allocate parameter buffers and compute output spatial shapes.
+
+        Args:
+            layer_cls: The layer class to instantiate (e.g., `Conv`, `Dense`).
+            input_shape: Feature/spatial shape tuple EXCLUDING the batch dimension
+                (e.g., `(28, 28, 1)` for 2D Conv or `(128,)` for Dense).
+            seed: Optional integer seed for deterministic parameter initialization.
+                Defaults to None.
+            **kwargs: Arbitrary keyword arguments forwarded directly to the
+                `layer_cls` constructor (e.g., `out_channels`, `stride`, `padding`).
+
+        Returns:
+            Layer: A fully initialized, device-compiled, and built layer instance.
+
+        Example:
+            >>> class TestConvLayer(AetherBaseLayerTestCase):
+            ...     def setUp(self):
+            ...         super().setUp()
+            ...         self.layer = self.make_built_layer(
+            ...             Conv,
+            ...             input_shape=(28, 28, 1),
+            ...             seed=42,
+            ...             in_channels=1,
+            ...             out_channels=16,
+            ...             filter_size=(3, 3),
+            ...             stride=(1, 1),
+            ...             padding="same",
+            ...         )
         """
         layer = layer_cls(**kwargs)
-        if hasattr(layer, '_compile_for_device'):
+
+        if hasattr(layer, "_compile_for_device"):
             layer._compile_for_device(self.backend_name)
-        return layer
-    def make_built_layer(self, layer_cls, seed: int | None = None, **kwargs):
-        """Construct, bind to backend, and allocate array buffers for 
-        parameterized layers (e.g., Dense, Conv2D).
-        """
-        layer = self.make_layer(layer_cls, **kwargs)
-        layer.build()
+
+        layer.build(input_shape, seed=seed)
         return layer
 
     def set_precision(self, layer, compute_dtype):
