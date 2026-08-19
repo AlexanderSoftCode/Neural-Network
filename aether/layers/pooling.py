@@ -207,7 +207,13 @@ class _PoolNd(Layer):
             :,
         ]
         return self.dinputs
-    
+
+    def get_config(self):
+        return {
+            "filter_size":  self.filter_size,
+            "stride":       self.stride,
+            "padding": self.padding
+        }
 class MaxPool2d(_PoolNd):
     def __init__(self, filter_size = (2, 2), stride = (2,2),
                  padding = 'valid'):

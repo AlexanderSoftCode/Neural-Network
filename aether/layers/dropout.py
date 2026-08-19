@@ -94,6 +94,11 @@ class Dropout(Layer):
         self.dinputs = dvalues * self.binary_mask
         return self.dinputs
 
+    def get_config(self):
+        return{
+            "rate": self.rate,
+            "seed": self.seed,
+        }
 class SpatialDropout(Layer): 
     
     def __init__(self, rate, seed=None):
@@ -161,3 +166,9 @@ class SpatialDropout(Layer):
     def _backward_fallback(self, dvalues): 
         self.dinputs = dvalues * self.channel_mask
         return self.dinputs
+
+    def get_config(self):
+        return{
+            "rate": self.rate,
+            "seed": self.seed,
+        }

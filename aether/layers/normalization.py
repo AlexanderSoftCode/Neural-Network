@@ -3,12 +3,12 @@ from aether.base import Layer
 
 class BatchNorm(Layer):
     _precision_exempt: bool = True
-    def __init__ (self, epsilon = 1e-5, momentum = 0.9, n_features = None):
+    def __init__ (self, epsilon = 1e-5, momentum = 0.9):
         super().__init__()
         self.epsilon = epsilon
         self.momentum = momentum
-        self.n_features = n_features
 
+        self.n_features = None
         self.gamma = None
         self.beta = None
         self.weights = self.gamma
@@ -105,20 +105,39 @@ class BatchNorm(Layer):
         )
         return self.dinputs
     
-    def get_parameters(self):
-        return (
-            self.gamma,
-            self.beta,
-            self.running_mean,
-            self.running_var
-        )
+    def get_config(self) -> dict:
+        return {
+            "epsilon": self.epsilon,
+            "momentum": self.momentum,
+            "n_features": self.n_features,
+        }
 
-    def set_parameters(self, gamma, beta, running_mean, running_var):
-        self.gamma = gamma
-        self.beta = beta
-        self.running_mean = running_mean
-        self.running_var = running_var
+    def get_parameters(self) -> dict:
+        return {
+            "gamma": self.gamma,
+            "beta": self.beta,
+            "running_mean": self.running_mean,
+            "running_var": self.running_var,
+        }
 
-        # keep internal references consistent
-        self.weights = self.gamma
-        self.biases  = self.beta
+    def set_parameters(
+        self,
+        gamma=None,
+        beta=None,
+        running_mean=None,
+        running_var=None,
+        **kwargs
+    ):
+        if gamma is not None:
+            self.gamma = gamma
+            self.weights = self.gamma
+
+        if beta is not None:
+            self.beta = beta
+            self.biases = self.beta
+
+        if running_mean is not None:
+            self.running_mean = running_mean
+
+        if running_var is not None:
+            self.running_var = running_var

@@ -65,6 +65,11 @@ class LeakyReLU(Layer):
         self.dinputs = dvalues * (1.0 - (self.output <= 0) * (1.0 - self.alpha))
         return self.dinputs
 
+    def get_config(self):
+        return {
+            "alpha": self.alpha,
+        }
+
 class SoftMax(Layer):
     _precision_exempt = True 
     def forward(self, inputs, training=False):

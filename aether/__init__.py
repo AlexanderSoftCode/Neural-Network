@@ -20,7 +20,12 @@ install_lazy_attrs(globals(), _TOP_LEVEL_MODULES)
 
 # Clean up private setup variables so ae.<tab> remains clean
 del (
-_LAYER_MODULES, _LOSS_MODULES, _ACC_MODULES,
- _OPTIMIZER_MODULES, _MODEL_MODULES, _PREPROCESSING_MODULES,
- install_lazy_attrs
+    install_lazy_attrs,
+    _LAYER_MODULES, 
+    _LOSS_MODULES, 
+    _ACC_MODULES,
+    _OPTIMIZER_MODULES, 
+    _MODEL_MODULES, 
+    _PREPROCESSING_MODULES,
+    _TOP_LEVEL_MODULES,
 )

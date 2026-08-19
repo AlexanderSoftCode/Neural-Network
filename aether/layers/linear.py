@@ -113,14 +113,25 @@ class Dense(Layer):
         self._weights_compute = None
 
         return self.dinputs
+
+    def get_config(self) -> dict:
+        return {
+            "n_inputs": self.n_inputs,
+            "n_neurons": self.n_neurons,
+            "weight_regularizer_l1": self.weight_regularizer_l1,
+            "bias_regularizer_l1": self.bias_regularizer_l1,
+            "weight_regularizer_l2": self.weight_regularizer_l2,
+            "bias_regularizer_l2": self.bias_regularizer_l2,
+        }
     
-    def get_parameters(self):
-        #pass We'll let Model call this function 
-        return self.weights, self.biases
-    
-    def set_parameters(self, weights, biases):
-        self.weights = weights
-        self.biases = biases
+    def get_parameters(self) -> dict:
+        return {"weights": self.weights, "biases": self.biases}
+
+    def set_parameters(self, weights=None, biases=None):
+        if weights is not None:
+            self.weights = weights
+        if biases is not None:
+            self.biases = biases
 
 class Flatten(Layer):
 

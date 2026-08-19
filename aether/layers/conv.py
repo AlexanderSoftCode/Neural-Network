@@ -388,6 +388,33 @@ class Conv(Layer):
         )
 
         return self.dinputs
+
+    def get_config(self) -> dict:
+        return {
+            "in_channels": self.C_in,
+            "out_channels": self.C_out,
+            "filter_size": self.filter_size,
+            "stride": self.stride,
+            "padding": self.padding,
+            "weight_regularizer_l1": self.weight_regularizer_l1,
+            "weight_regularizer_l2": self.weight_regularizer_l2,
+            "bias_regularizer_l1": self.bias_regularizer_l1,
+            "bias_regularizer_l2": self.bias_regularizer_l2,
+        }
+
+    def get_parameters(self) -> dict:
+        return {
+            "weights": self.weights,    # accesses self.filter_weights under the hood
+            "biases": self.biases,
+        }
+
+    def set_parameters(self, weights=None, biases=None):
+        if weights is not None:
+            self.weights = weights
+            self._fp16_weight_valid = False  # Invalidate stale runtime cache on parameter load
+        if biases is not None:
+            self.biases = biases
+
     @property
     def filter_weights(self):
         return self._filter_weights
