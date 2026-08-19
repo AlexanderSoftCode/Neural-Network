@@ -11,6 +11,7 @@ _LAYER_MODULES = {
     "GlobalAvgPool":  "aether.layers.pooling",
     "Dropout":        "aether.layers.dropout",
     "SpatialDropout": "aether.layers.dropout",
+    "BatchNorm":      "aether.layers.normalization",
 }
 
 install_lazy_attrs(globals(), _LAYER_MODULES)

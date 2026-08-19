@@ -12,7 +12,7 @@ from aether.layers.conv import Conv as Conv
 from aether.layers.activations import ReLU as ReLU, LeakyReLU as LeakyReLU, SoftMax as SoftMax
 from aether.layers.pooling import MaxPool2d as MaxPool2d, AvgPool2d as AvgPool2d, GlobalAvgPool as GlobalAvgPool
 from aether.layers.dropout import Dropout as Dropout, SpatialDropout as SpatialDropout
-
+from aether.layers.normalization import BatchNorm as BatchNorm
 from aether.losses.categorical_crossentropy import (
     Loss as Loss,
     CategoricalCrossEntropy as CategoricalCrossEntropy,
@@ -49,6 +49,7 @@ __all__ = [
     "GlobalAvgPool",
     "Dropout",
     "SpatialDropout",
+    "BatchNorm",
     # losses
     "Loss",
     "CategoricalCrossEntropy",
