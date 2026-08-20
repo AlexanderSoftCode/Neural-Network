@@ -26,9 +26,25 @@ def _cce_per_sample_loss(xp, probs_clip, y_true_sparse, n_classes, label_smoothi
 
 
 class Loss:
+    prohibited_preceding_layers = ()  # Default: base loss forbids nothing
     def __init__(self):
         self.new_pass()
 
+    def new_pass(self):
+        self.accumulated_sum = 0
+        self.accumulated_count = 0
+
+    def validate_graph(self, layers: list):
+        """Validates that the model graph architecture is compatible with this loss function."""
+
+        last_layer = layers[-1]
+        if isinstance(last_layer, self.prohibited_preceding_layers):
+            prohibited_names = ", ".join(cls.__name__ for cls in self.prohibited_preceding_layers)
+            raise ValueError(
+                f"[aether] '{type(self).__name__}' operates directly on unnormalized logits. "
+                f"Do not add an explicit '{prohibited_names}' layer immediately preceding this loss."
+            )
+        
     def remember_trainable_layers(self, trainable_layers):
         self.trainable_layers = trainable_layers
 
@@ -53,10 +69,6 @@ class Loss:
 
         return data_loss, self.regularization_loss() 
     
-    def new_pass(self):
-        self.accumulated_sum = 0
-        self.accumulated_count = 0
-
     def regularization_loss(self):
         regularization_loss = 0             # if we don't do this, we risk overfitting.
                                             # We will have to denote partials for this too...
@@ -120,6 +132,7 @@ class CategoricalCrossEntropy(Loss):
 
 
 class SoftmaxCategoricalCrossEntropy(Loss):
+    prohibited_preceding_layers = (SoftMax,)
     def __init__(self, label_smoothing = 0.0):
         super().__init__()
         self.activation = SoftMax()

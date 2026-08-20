@@ -109,7 +109,6 @@ class BatchNorm(Layer):
         return {
             "epsilon": self.epsilon,
             "momentum": self.momentum,
-            "n_features": self.n_features,
         }
 
     def get_parameters(self) -> dict:

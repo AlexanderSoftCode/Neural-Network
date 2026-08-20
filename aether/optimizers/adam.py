@@ -2,20 +2,74 @@ import numpy as np
 import aether.config as config
 from aether.custom_kernels.adam_kernel import _adam_update_kernel
 
-# General starting learning rate for SGD is 1.0, with a decay down to 0.1. For Adam, a good starting 
-# LR is 0.001 (1e-3), decaying down to 0.0001 (1e-4). Different problems may require different 
-# values here, but these are decent to start.
-class Adam:
-    def __init__(self, learning_rate=.001, decay=0., epsilon=1e-7, beta_1=0.9, beta_2=.999):
+class Optimizer:
+    """Base class for all Aether ML optimizers.
+
+    Provides parameter tracking, regularized gradient calculations (L1/L2),
+    and decoupled weight decay resolution.
+    """
+
+    def __init__(self, learning_rate: float = 0.001, decay: float = 0.0):
         self.learning_rate = learning_rate
         self.current_learning_rate = learning_rate
         self.decay = decay
         self.iterations = 0
+        self.layers = []
+
+    def init_params(self, trainable_layers: list):
+        """Registers trainable layers passed from Model.finalize()."""
+        self.layers = trainable_layers
+
+    @staticmethod
+    def _l1_subgradient(param, l1_lambda, xp):
+        """Sub-gradient of L1 regularization matching the +1-at-zero convention."""
+        return l1_lambda * xp.where(param < 0, -1.0, 1.0).astype(param.dtype)
+
+    def _get_regularized_gradients(self, layer, xp):
+        """Folds coupled L1/L2 regularizations configured on the layer into dweights/dbiases."""
+        dweights = layer.dweights
+        dbiases = getattr(layer, "dbiases", None)
+
+        if getattr(layer, "weight_regularizer_l1", 0.0) > 0:
+            dweights = dweights + self._l1_subgradient(
+                layer.weights, layer.weight_regularizer_l1, xp
+            )
+        if getattr(layer, "weight_regularizer_l2", 0.0) > 0:
+            dweights = dweights + 2.0 * layer.weight_regularizer_l2 * layer.weights
+
+        if dbiases is not None:
+            if getattr(layer, "bias_regularizer_l1", 0.0) > 0:
+                dbiases = dbiases + self._l1_subgradient(
+                    layer.biases, layer.bias_regularizer_l1, xp
+                )
+            if getattr(layer, "bias_regularizer_l2", 0.0) > 0:
+                dbiases = dbiases + 2.0 * layer.bias_regularizer_l2 * layer.biases
+
+        return dweights, dbiases
+
+    def _resolve_weight_decay(self, layer) -> float:
+        """Resolves decoupled weight decay coefficient (for AdamW-style optimizers)."""
+        if getattr(layer, "no_weight_decay", False):
+            return 0.0
+        return getattr(self, "weight_decay", 0.0)
+
+    def step(self):
+        """Unified optimizer entry point executed once per training step."""
+        raise NotImplementedError(
+            f"Optimizer '{type(self).__name__}' must implement a step() method."
+        )
+
+# General starting learning rate for SGD is 1.0, with a decay down to 0.1. For Adam, a good starting 
+# LR is 0.001 (1e-3), decaying down to 0.0001 (1e-4). Different problems may require different 
+# values here, but these are decent to start.
+class Adam(Optimizer):
+    def __init__(self, learning_rate=.001, decay=0., epsilon=1e-7, beta_1=0.9, beta_2=.999):
+
+        super().__init__(learning_rate, decay)
         self.epsilon = epsilon
         self.beta_1 = beta_1
         self.beta_2 = beta_2  # used to be known as our rho
 
-        self.layers = []
         self._step_impl = self._step_fallback
 
     def init_params(self, trainable_layers):
@@ -23,7 +77,7 @@ class Adam:
         Called once during Model.finalize() to register trainable layers
         and pre-allocate optimizer and momentum cache buffers in fp32.
         """
-        self.layers = trainable_layers
+        super().init_params(trainable_layers)
         xp = config.xp
 
         for layer in self.layers:
