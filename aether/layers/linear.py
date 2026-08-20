@@ -4,15 +4,24 @@ import aether.config as config
 from aether.base import Layer
 
 class Dense(Layer):
-    def __init__(self, n_inputs, n_neurons, weight_regularizer_l1 = 0,
-                 bias_regularizer_l1 = 0, weight_regularizer_l2 = 0,
-                 bias_regularizer_l2 = 0):
+    """Fully connected (Dense) layer.
+
+    Parameters
+    ----------
+    n_inputs : int
+        Number of input features.
+    n_neurons : int
+        Number of output neurons.
+    l1 : float or tuple, default=()
+        L1 penalty. Pass a float for weights only, or (weight, bias).
+    l2 : float or tuple, default=()
+        L2 penalty. Pass a float for weights only, or (weight, bias).
+    """
+
+    def __init__(self, n_inputs, n_neurons, l1=(), l2=()):
         self.n_inputs = n_inputs
         self.n_neurons= n_neurons
-        self.weight_regularizer_l1 = weight_regularizer_l1
-        self.weight_regularizer_l2 = weight_regularizer_l2
-        self.bias_regularizer_l1 = bias_regularizer_l1
-        self.bias_regularizer_l2 = bias_regularizer_l2
+        self._set_regularizers(l1, l2)
 
         self.seed = None
         self.weights = None
@@ -102,7 +111,7 @@ class Dense(Layer):
         weights_c = self._weights_compute if self._weights_compute is not None \
         else self.precision_policy.cast_to_compute(self.weights)[0]
 
-        dweights = xp.dot(self.inputs.T, dvalues)
+        dweights = xp.dot(inputs_c.T, dvalues)
         dbiases = xp.sum(dvalues, axis = 0, keepdims = True)
         dinputs_c = xp.dot(dvalues_c, weights_c.T)
 
@@ -118,12 +127,9 @@ class Dense(Layer):
         return {
             "n_inputs": self.n_inputs,
             "n_neurons": self.n_neurons,
-            "weight_regularizer_l1": self.weight_regularizer_l1,
-            "bias_regularizer_l1": self.bias_regularizer_l1,
-            "weight_regularizer_l2": self.weight_regularizer_l2,
-            "bias_regularizer_l2": self.bias_regularizer_l2,
+            "l1": (self.weight_regularizer_l1, self.bias_regularizer_l1),
+            "l2": (self.weight_regularizer_l2, self.bias_regularizer_l2),
         }
-    
     def get_parameters(self) -> dict:
         return {"weights": self.weights, "biases": self.biases}
 

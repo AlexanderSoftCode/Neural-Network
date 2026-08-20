@@ -2,8 +2,34 @@ import numpy as np
 import aether.config as config
 from aether.base import Layer
 from aether.custom_kernels import conv_kernel
-class Conv(Layer):
-    def __init__(self, in_channels, out_channels = 1, filter_size = (3, 3), stride = (1, 1), padding = "same"):
+class Conv2d(Layer):
+    """2D Convolutional layer for spatial feature extraction over NHWC inputs.
+
+    Parameters
+    ----------
+    in_channels : int
+        Number of channels in the input tensor (e.g., 3 for RGB).
+    out_channels : int, default=1
+        Number of filters / feature maps to produce.
+    filter_size : tuple of int, default=(3, 3)
+        Spatial dimensions of the convolutional kernel as (height, width).
+    stride : tuple of int, default=(1, 1)
+        Stride step size along (height, width).
+    padding : {"same", "valid"}, default="same"
+        Padding mode. "same" preserves spatial dimensions (with stride 1),
+        "valid" applies no padding.
+    l1 : float or tuple, default=()
+        L1 penalty. Pass a float for weights only, or (weight, bias).
+    l2 : float or tuple, default=()
+        L2 penalty. Pass a float for weights only, or (weight, bias).
+
+    Notes
+    -----
+    Expected input shape: ``(batch_size, height, width, in_channels)``
+    Output shape: ``(batch_size, out_height, out_width, out_channels)``
+    """
+    
+    def __init__(self, in_channels, out_channels = 1, filter_size = (3, 3), stride = (1, 1), padding = "same", l1=(), l2=()):
         super().__init__()
         # input_shape has form (batch_size, height, width, channels)
         self.C_in = in_channels
@@ -12,10 +38,7 @@ class Conv(Layer):
         self.stride = stride
         self.padding = padding 
 
-        self.weight_regularizer_l1 = 0
-        self.weight_regularizer_l2 = 0
-        self.bias_regularizer_l1 = 0
-        self.bias_regularizer_l2 = 0
+        self._set_regularizers(l1, l2)
 
         self.forward = self._forward_fallback
         self.backward = self._backward_fallback
@@ -396,10 +419,8 @@ class Conv(Layer):
             "filter_size": self.filter_size,
             "stride": self.stride,
             "padding": self.padding,
-            "weight_regularizer_l1": self.weight_regularizer_l1,
-            "weight_regularizer_l2": self.weight_regularizer_l2,
-            "bias_regularizer_l1": self.bias_regularizer_l1,
-            "bias_regularizer_l2": self.bias_regularizer_l2,
+            "l1": (self.weight_regularizer_l1, self.bias_regularizer_l1),
+            "l2": (self.weight_regularizer_l2, self.bias_regularizer_l2),
         }
 
     def get_parameters(self) -> dict:

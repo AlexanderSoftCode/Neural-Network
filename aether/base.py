@@ -60,18 +60,23 @@ class Layer:
             if hasattr(self, name):
                 setattr(self, name, value)
 
-"""    def to(self, device):
-        
-        Polymorphic state migration engine.
-        Each layer isolates its own hardware allocations.
-        
-        # Trigger compile/pointer swaps if specific layer overrides it
-        self._compile_for_device(device)
+    @staticmethod
+    def _parse_reg(reg):
+        """Normalizes scalar, 1-tuple, or 2-tuple into (weight_reg, bias_reg)."""
+        if isinstance(reg, (int, float)):
+            return (float(reg), 0.0)
+        if not reg:
+            return (0.0, 0.0)
+        if len(reg) == 1:
+            return (float(reg[0]), 0.0)
+        if len(reg) == 2:
+            return (float(reg[0]), float(reg[1]))
+        raise ValueError(
+            f'Regularizer expects 1 or 2 values (weight, bias), got {len(reg)}'
+        )
 
-        # Locate and migrate any tracking arrays/tensors
-        # This catches, weights, biases, or future states dynamically
-        for attr_name, attr_value in self.__dict__.items():
-            # If attribute is a tensor, shift its VRAM boundary safely
-            if hasattr(attr_value, 'shape'):
-                setattr(self, attr_name, config.to_device(attr_value, target=device))
-"""
+    def _set_regularizers(self, l1=(), l2=()):
+        """Helper for trainable layers to bind attributes required by Loss and Adam."""
+        self.weight_regularizer_l1, self.bias_regularizer_l1 = self._parse_reg(l1)
+        self.weight_regularizer_l2, self.bias_regularizer_l2 = self._parse_reg(l2)
+        

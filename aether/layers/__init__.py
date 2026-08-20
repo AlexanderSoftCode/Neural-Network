@@ -2,7 +2,7 @@ from aether._lazy import install_lazy_attrs
 _LAYER_MODULES = {
     "Dense":         "aether.layers.linear",
     "Flatten":       "aether.layers.linear",
-    "Conv":          "aether.layers.conv",
+    "Conv2d":          "aether.layers.conv",
     "ReLU":          "aether.layers.activations",
     "LeakyReLU":     "aether.layers.activations",
     "SoftMax":       "aether.layers.activations",

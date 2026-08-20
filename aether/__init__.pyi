@@ -8,7 +8,7 @@
 from aether.model import Model as Model
 
 from aether.layers.linear import Dense as Dense, Flatten as Flatten
-from aether.layers.conv import Conv as Conv
+from aether.layers.conv import Conv2d as Conv2d
 from aether.layers.activations import ReLU as ReLU, LeakyReLU as LeakyReLU, SoftMax as SoftMax
 from aether.layers.pooling import MaxPool2d as MaxPool2d, AvgPool2d as AvgPool2d, GlobalAvgPool as GlobalAvgPool
 from aether.layers.dropout import Dropout as Dropout, SpatialDropout as SpatialDropout
@@ -40,7 +40,7 @@ __all__ = [
     # layers
     "Dense",
     "Flatten",
-    "Conv",
+    "Conv2d",
     "ReLU",
     "LeakyReLU",
     "SoftMax",
