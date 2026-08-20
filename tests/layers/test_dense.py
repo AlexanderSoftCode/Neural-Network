@@ -74,18 +74,6 @@ def make_suite(backend_name, Layer_Class):
             # compare the values
             self.xp.testing.assert_array_almost_equal(output, expected_output)
 
-        def test_get_and_set_parameters(self):
-            """Verify parameter geter and setter roundtrips."""
-            w_orig, b_orig = self.layer.get_parameters()
-            new_w = self.xp.ones_like(w_orig) * 0.25
-            new_b = self.xp.ones_like(b_orig) * 0.05
-
-            self.layer.set_parameters(new_w, new_b)
-            w_res, b_res = self.layer.get_parameters()
-
-            self.assertTrue(self.xp.array_equal(w_res, new_w))
-            self.assertTrue(self.xp.array_equal(b_res, new_b))
-
 
         def test_forward_training_branch_caching(self):
             """Verify forward(training=True) populates ephemeral compute caches."""

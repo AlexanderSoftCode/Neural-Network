@@ -40,10 +40,10 @@ class ModelIntegrationBaseCase(AetherBaseTestCase):
         SoftmaxCategoricalCrossEntropy loss (no explicit SoftMax layer).
         """
         model = ae.Model()
-        model.add(ae.Conv(3, 32, (3, 3), (1, 1), padding="same"))
+        model.add(ae.Conv2d(3, 32, (3, 3), (1, 1), padding="same"))
         model.add(ae.MaxPool2d((2, 2), (2, 2), padding="valid"))
         model.add(ae.ReLU())
-        model.add(ae.Conv(32, 64, (3, 3), (1, 1), padding="same"))
+        model.add(ae.Conv2d(32, 64, (3, 3), (1, 1), padding="same"))
         model.add(ae.AvgPool2d((2,2), (2, 2), padding="valid"))
         model.add(ae.LeakyReLU(alpha=0.01))
         model.add(ae.SpatialDropout(rate=0.05, seed=self.SEED))

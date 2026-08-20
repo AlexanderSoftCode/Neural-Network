@@ -3,6 +3,7 @@ from aether.losses.categorical_crossentropy import (
     CategoricalCrossEntropy,
     SoftmaxCategoricalCrossEntropy
 )
+from aether.layers.linear import Dense
 from aether.layers.activations import SoftMax
 from tests.base_case import AetherBaseLayerTestCase
 TARGET_LAYER = SoftmaxCategoricalCrossEntropy
@@ -38,8 +39,8 @@ def make_suite(backend_name, Layer_Class):
                 [1.0, 0.0, 0.0, 0.0],
                 [0.0, 0.0, 1.0, 0.0]
             ])
-            layer_softmax = self.make_component(
-                SoftMax,
+            layer_softmax = self.make_built_layer(
+                SoftMax, input_shape=(4,),
             )
             layer_cce_loss = self.make_component(
                 CategoricalCrossEntropy, 
@@ -337,6 +338,28 @@ def make_suite(backend_name, Layer_Class):
                 atol=1e-3,
                 err_msg="Analytical dinputs do not match numerical finite difference gradients!"
             )
+        def test_combined_loss_raises_error_for_layer_when_softmax(self):
+            last_layer_in_network = self.make_built_layer(
+                SoftMax, input_shape=(4,)
+            )
+            
+            with self.assertRaises(ValueError) as ctx:
+                self.layer.validate_graph(layers=[last_layer_in_network])
+                
+            # Check for key keywords rather than exact long phrases
+            self.assertIn("unnormalized", str(ctx.exception))
+            self.assertIn("SoftMax", str(ctx.exception))
+
+        def test_combined_loss_passes_for_valid_preceding_layer(self):
+            """Confirms validate_graph succeeds when the preceding layer is not prohibited."""
+            valid_preceding_layer = self.make_built_layer(
+                Dense, n_inputs=4, n_neurons=4, input_shape=(4,)
+            )
+            
+            try:
+                self.layer.validate_graph(layers=[valid_preceding_layer])
+            except ValueError:
+                self.fail("validate_graph raised ValueError unexpectedly on a valid layer!")
 
     TestActivationSoftmaxLossCCE.__name__ = class_name
     TestActivationSoftmaxLossCCE.__qualname__ = class_name

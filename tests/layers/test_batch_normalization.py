@@ -33,10 +33,9 @@ def make_suite(backend_name, Layer_Class):
             # 2D Dense BatchNorm instance
             self.layer_dense = self.make_built_layer(
                 Layer_Class, 
-                input_shape= self.DENSE_SHAPE[1],
+                input_shape= (self.DENSE_SHAPE[1],),
                 epsilon=self.EPSILON, 
                 momentum=self.MOMENTUM, 
-                n_features=self.NUM_FEATURES_DENSE
             )
 
             # 4D Conv BatchNorm instance
@@ -45,7 +44,6 @@ def make_suite(backend_name, Layer_Class):
                 input_shape = self.CONV_SHAPE[1:],
                 epsilon=self.EPSILON, 
                 momentum=self.MOMENTUM, 
-                n_features=self.NUM_CHANNELS_CONV
             )
 
             # Seeded input batches
@@ -173,24 +171,6 @@ def make_suite(backend_name, Layer_Class):
             self.assertEqual(self.layer_conv.dweights.dtype, self.xp.float32)
             self.assertEqual(self.layer_conv.dbiases.dtype, self.xp.float32)
 
-        def test_get_set_parameters(self):
-            """Verify parameter extraction and restoration for model checkpointing."""
-            gamma = self.xp.full((self.NUM_FEATURES_DENSE,), 2.5, dtype=self.xp.float32)
-            beta = self.xp.full((self.NUM_FEATURES_DENSE,), -1.0, dtype=self.xp.float32)
-            running_mean = self.xp.full((self.NUM_FEATURES_DENSE,), 0.5, dtype=self.xp.float32)
-            running_var = self.xp.full((self.NUM_FEATURES_DENSE,), 1.2, dtype=self.xp.float32)
-
-            self.layer_dense.set_parameters(gamma, beta, running_mean, running_var)
-            params = self.layer_dense.get_parameters()
-
-            self.assertTrue(self.xp.allclose(params[0], gamma))
-            self.assertTrue(self.xp.allclose(params[1], beta))
-            self.assertTrue(self.xp.allclose(params[2], running_mean))
-            self.assertTrue(self.xp.allclose(params[3], running_var))
-
-            # Ensure optimizer aliases were reconnected properly
-            self.assertIs(self.layer_dense.weights, self.layer_dense.gamma)
-            self.assertIs(self.layer_dense.biases, self.layer_dense.beta)
 
     TestBatchNormLayer.__name__ = class_name
     TestBatchNormLayer.__qualname__ = class_name

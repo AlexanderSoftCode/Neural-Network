@@ -1,8 +1,8 @@
 import aether.config as config
 from tests.base_case import AetherBaseLayerTestCase
 
-from aether.layers.conv import Conv
-TARGET_LAYER = Conv
+from aether.layers.conv import Conv2d
+TARGET_LAYER = Conv2d
 
 backends_to_test = ['numpy']
 try:
@@ -140,7 +140,7 @@ def make_suite(backend_name, Layer_Class):
             """Verify forward pass with multi-channel input (e.g., RGB with C_in=3)"""
             layer = self.make_built_layer(
                 Layer_Class,
-                input_shape = self.CONV_SHAPE[1:],
+                input_shape = (28, 28, 3),
                 in_channels=3,
                 out_channels=8,
                 filter_size=self.FILTER_SIZE,

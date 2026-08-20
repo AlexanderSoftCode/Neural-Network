@@ -11,7 +11,7 @@ from aether.layers.linear import Dense, Flatten
 from aether.layers.activations import SoftMax
 from aether.losses import Loss, SoftmaxCategoricalCrossEntropy
 from aether.metrics import Accuracy, CategoricalAccuracy
-from aether.optimizers import Adam
+from aether.optimizers import Optimizer, Adam
 
 TARGET_CLASS = Model
 
@@ -197,7 +197,7 @@ def make_suite(backend_name, Target_Class):
                 def backward(self, dvalues, y_true):
                     self.dinputs = dvalues
 
-            class MockSyncOptimizer:
+            class MockSyncOptimizer(Optimizer):
                 def __init__(self):
                     self.compiled_device = None
                 def _compile_for_device(self, device):
@@ -452,6 +452,70 @@ def make_suite(backend_name, Target_Class):
             self.assertIsNone(dense._inputs_compute)
             self.assertIsNone(dense._weights_compute)
 
+        # ---- 5. Device Alignment & Fail-Fast Guard Tests ----
+
+        def test_device_alignment_guard_raises_on_numpy_with_cupy_tensors(self):
+            """Verify that a NumPy-configured model loudly rejects CuPy GPU inputs."""
+            if 'cupy' not in backends_to_test:
+                self.skipTest("CuPy backend not installed or configured in environment.")
+
+            model = Target_Class()
+            model.add(MockTrainableLayer(self.NUM_FEATURES, self.NUM_CLASSES))
+            model.to('numpy')
+            model.configure(
+                loss=SoftmaxCategoricalCrossEntropy(),
+                optimizer=Adam(learning_rate=0.01),
+                accuracy=CategoricalAccuracy()
+            )
+            model.finalize((self.NUM_FEATURES,))
+
+            # Allocate GPU tensors via CuPy
+            X_cupy = cp.random.randn(self.NUM_SAMPLES, self.NUM_FEATURES).astype('float32')
+            y_cupy = cp.random.randint(0, self.NUM_CLASSES, size=(self.NUM_SAMPLES,)).astype('int32')
+
+            # Check train() raises TypeError on mismatch
+            with self.assertRaises(TypeError) as ctx:
+                model.train(X_cupy, y_cupy, epochs=1, batch_size=8)
+            self.assertIn("Device mismatch", str(ctx.exception))
+
+            # Check validation_data device mismatch raises TypeError
+            X_np = np.random.randn(self.NUM_SAMPLES, self.NUM_FEATURES).astype('float32')
+            y_np = np.random.randint(0, self.NUM_CLASSES, size=(self.NUM_SAMPLES,)).astype('int32')
+            with self.assertRaises(TypeError) as ctx:
+                model.train(X_np, y_np, epochs=1, batch_size=8, validation_data=(X_cupy, y_cupy))
+            self.assertIn("Device mismatch", str(ctx.exception))
+
+        def test_device_alignment_guard_raises_on_cupy_with_numpy_tensors(self):
+            """Verify that a CuPy-configured model loudly rejects host NumPy inputs."""
+            if 'cupy' not in backends_to_test:
+                self.skipTest("CuPy backend not installed or configured in environment.")
+
+            model = Target_Class()
+            model.add(MockTrainableLayer(self.NUM_FEATURES, self.NUM_CLASSES))
+            model.to('cupy')
+            model.configure(
+                loss=SoftmaxCategoricalCrossEntropy(),
+                optimizer=Adam(learning_rate=0.01),
+                accuracy=CategoricalAccuracy()
+            )
+            model.finalize((self.NUM_FEATURES,))
+
+            # Allocate host tensors via NumPy
+            X_numpy = np.random.randn(self.NUM_SAMPLES, self.NUM_FEATURES).astype('float32')
+            y_numpy = np.random.randint(0, self.NUM_CLASSES, size=(self.NUM_SAMPLES,)).astype('int32')
+
+            # Check train() raises TypeError on mismatch
+            with self.assertRaises(TypeError) as ctx:
+                model.train(X_numpy, y_numpy, epochs=1, batch_size=8)
+            self.assertIn("Device mismatch", str(ctx.exception))
+
+            # Check validation_data device mismatch raises TypeError
+            X_cp = cp.random.randn(self.NUM_SAMPLES, self.NUM_FEATURES).astype('float32')
+            y_cp = cp.random.randint(0, self.NUM_CLASSES, size=(self.NUM_SAMPLES,)).astype('int32')
+            with self.assertRaises(TypeError) as ctx:
+                model.train(X_cp, y_cp, epochs=1, batch_size=8, validation_data=(X_numpy, y_numpy))
+            self.assertIn("Device mismatch", str(ctx.exception))
+            
     TestModel.__name__ = class_name
     TestModel.__qualname__ = class_name
 

@@ -1,7 +1,7 @@
 import aether.config as config
 from tests.base_case import AetherBaseLayerTestCase
 from aether.layers.linear import Dense
-from aether.layers.conv import Conv
+from aether.layers.conv import Conv2d
 
 backends_to_test = ['numpy']
 try:
@@ -293,7 +293,7 @@ def make_suite(backend_name, Optimizer_Class):
                 self.skipTest("GPU cache test is only applicable to CuPy backend.")
 
             layer, optimizer = self.make_layer_and_optimizer(
-                Conv, Optimizer_Class, self.xp
+                Conv2d, Optimizer_Class, self.xp
             )
 
             fixed_input = self.xp.random.randn(2, 8, 8, 1).astype(self.xp.float32)
