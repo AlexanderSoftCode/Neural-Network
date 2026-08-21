@@ -8,6 +8,7 @@ import aether.layers as layer_module
 from aether.base import Layer
 from aether.losses import Loss, SoftmaxCategoricalCrossEntropy
 from aether.metrics import Accuracy
+from aether.optimizers import Optimizer
 
 try:
     import safetensors.numpy
@@ -30,7 +31,7 @@ class Model():
         if not isinstance(layer, Layer):
             raise TypeError(
                 f"Expected an instance of 'Layer', but got `{type(layer).__name__}`."
-                "Make sure the layer your passing in inherits from aether.base.Layer"
+                "Make sure the layer you are passing in inherits from aether.base.Layer"
             )
         self.layers.append(layer)
 
@@ -42,7 +43,7 @@ class Model():
     
     def configure(self, loss=None, optimizer=None, accuracy=None):
         """Configures the training components (loss, optimizer, metrics) for the model.
-        Utilizes strict type checking for Loss and duck typing for optimizer/metric.
+        Utilizes strict type checking for loss, optimizer, and accuracy. 
         """
         if loss is None and optimizer is None and accuracy is None:
             raise ValueError(
@@ -54,18 +55,19 @@ class Model():
             if not isinstance(loss, Loss):
                 raise TypeError(
                     f"Expected an instance of 'Loss', but got {type(loss).__name__}."
-                    "Make sure the loss your passing in inherits from aether.losses.loss"
+                    "Make sure the loss your are passing in inherits from aether.losses.loss"
                 )
             else:
                 self.loss = loss
 
         if optimizer is not None:
-            if not hasattr(optimizer, "update_params") and not hasattr(optimizer, "step"):                
+            if not isinstance(optimizer, Optimizer):
                 raise TypeError(
-                    f"Object '{type(optimizer).__name__}' is not a valid optimizer."
-                    "Expected method 'update_params' or 'step'"
+                    f"Expected an instance of 'Optimizer', but got '{type(optimizer).__name__}'. "
+                    "Make sure the optimizer you are passing in inherits from aether.optimizers.Optimizer."
                 )
-            self.optimizer = optimizer
+            else:
+                self.optimizer = optimizer
 
         if accuracy is not None:
             if not isinstance(accuracy, Accuracy):
@@ -166,13 +168,13 @@ class Model():
         for idx, layer in enumerate(self.layers):
             layer_seed = (self._seed + idx) if self._seed is not None else None
             
-            # 1. Unconditionally build and propagate shape
+            # Unconditionally build and propagate shape
             try:
                 current_shape = layer.build(current_shape, seed=layer_seed)
             except TypeError:
                 current_shape = layer.build(current_shape)
 
-            # 2. Stochastic layers (e.g. Dropout RNG stream) rebind if needed
+            # Stochastic layers (e.g. Dropout RNG stream) rebind if needed
             if hasattr(layer, "_set_seed"):
                 if layer.seed is None and layer_seed is not None:
                     layer._set_seed(layer_seed)
@@ -203,6 +205,28 @@ class Model():
                 
         self._sync_device()
         self.is_finalized = True
+
+    def _assert_device_alignment(self, X, y=None):
+        """Ensure incoming input tensors strictly match the configured hardware backend."""
+        expected_backend = getattr(self, "device", "numpy")
+        
+        is_x_cupy = type(X).__module__.startswith("cupy")
+        is_y_cupy = type(y).__module__.startswith("cupy") if y is not None else is_x_cupy
+
+        if expected_backend == "cupy":
+            if not is_x_cupy or not is_y_cupy:
+                raise TypeError(
+                    f"[aether] Device mismatch: Model is configured for CuPy backend ('cupy'), "
+                    f"but received input tensors on host (X: {type(X).__name__}, y: {type(y).__name__ if y is not None else 'None'}). "
+                    f"Transfer your arrays using cp.asarray() before calling train/evaluate/predict."
+                )
+        else:  # numpy
+            if is_x_cupy or is_y_cupy:
+                raise TypeError(
+                    f"[aether] Device mismatch: Model is configured for NumPy backend ('numpy'), "
+                    f"but received CuPy GPU tensors. Transfer your data to host memory via cp.asnumpy() "
+                    f"or migrate the model first via model.to('cupy')."
+                )
 
     def forward(self, X, training=True):
         """
@@ -253,6 +277,9 @@ class Model():
                 "[aether] Model must be explicitly finalized before training. "
                 "Call model.finalize(input_shape) first."
             )
+        self._assert_device_alignment(X, y)
+        if validation_data is not None: 
+            self._assert_device_alignment(validation_data[0], validation_data[1])
 
         num_samples = len(X)
         effective_batch_size = batch_size if batch_size is not None else num_samples
@@ -598,7 +625,13 @@ class Model():
             )
 
         # -------------------------------------------------------------
-        # 1. Unpack Zip Archive in Memory
+        # 1. Resolve Target Hardware Device
+        # -------------------------------------------------------------
+        active_backend = "cupy" if getattr(config.xp, "__name__", "") == "cupy" else "numpy"
+        target_device = device if device is not None else active_backend
+
+        # -------------------------------------------------------------
+        # 2. Unpack Zip Archive in Memory
         # -------------------------------------------------------------
         with zipfile.ZipFile(filepath, "r") as zipf:
             arch_bytes = zipf.read("architecture.json")
@@ -608,7 +641,7 @@ class Model():
         raw_weights = safetensors.numpy.load(weights_bytes)
 
         # -------------------------------------------------------------
-        # 2. Reconstruct Model Graph & Layers
+        # 3. Reconstruct Model Graph & Layers
         # -------------------------------------------------------------
         model = cls()
 
@@ -634,16 +667,15 @@ class Model():
             model.add(layer_cls(**sanitized_cfg))
 
         # -------------------------------------------------------------
-        # 3. Hardware Backend Migration & Graph Finalization
+        # 4. Hardware Backend Migration & Graph Finalization
         # -------------------------------------------------------------
-        if device is not None:
-            model.to(device)
+        model.to(target_device)
 
         input_shape = tuple(manifest["input_shape"])
         model.finalize(input_shape=input_shape)
 
         # -------------------------------------------------------------
-        # 4. Group & Hydrate Parameters into Layers
+        # 5. Group & Hydrate Parameters into Layers
         # -------------------------------------------------------------
         layer_param_map: dict[int, dict] = {}
         for flat_key, array in raw_weights.items():
@@ -654,14 +686,17 @@ class Model():
             if idx not in layer_param_map:
                 layer_param_map[idx] = {}
 
-            layer_param_map[idx][param_name] = config.to_device(array)
+            # Route arrays directly to the resolved target device
+            layer_param_map[idx][param_name] = config.to_device(
+                array, target=target_device
+            )
 
         for idx, params in layer_param_map.items():
             if idx < len(model.layers):
                 model.layers[idx].set_parameters(**params)
 
         # -------------------------------------------------------------
-        # 5. Apply Precision Policy
+        # 6. Apply Precision Policy
         # -------------------------------------------------------------
         if manifest.get("precision_policy") is not None:
             model.set_precision(manifest["precision_policy"])
