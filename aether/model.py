@@ -103,30 +103,44 @@ class Model():
 
         Configures the global execution backend (numpy or cupy) and
         recursively prepares all components device backend, and dedicated
-        kernels if user is using cupy.
+        kernels if user is using cupy. As only trainable layers hold tensors and are
+        accessed during the loop, the layers are updated in place, meaning its possible
+        to use this after training for say inference.
 
         Args:
             device (str): The target hardware execution device 
             ('cupy' or 'numpy)
         Raises:
-            RuntimeError: If user calls model.to() before model.finalize()
             ValueError: If `device` specifies an unsupported or unconfigured backend
-        
-        Note:
-            Method must be called prior to training or evaluation if switching backends
-            (e.g., NumPy to CuPy), as it triggers internal array migrations and kernel
-            allocations across all underlying components.
+        Example:
+            >>> model = ae.Model()
+            ... model.add(...)
+            ... model.add(...)
+            ... model.to("cupy")
+            ... # Now we can train and evaluate in cupy backend
+            ... model.configure
+            ... model.finalize(input_shape=(...))
+            ... model.train(X, y, epochs=5, shuffle=True, evaluat)
+            ... model.evaluate(X_val, y_val)
+            ... model.to("numpy")
+            ... # We can perform inference on the CPU now
+            ... preds = model.predict(X_cpu)
         """
-        if self.is_finalized:
-            raise RuntimeError(
-                "[aether] model.to() must be called BEFORE model.finalize(). " \
-                "Re-migrating an already finalized graph causes needless host-device copies."
-            )
         target_device = device.lower()
         config.set_backend(target_device)
         self.device = target_device
-
         self._sync_device(target_device=target_device)
+
+        if self.is_finalized:
+            for layer in self.trainable_layers:
+                param_dict = layer.get_parameters()
+                migrated_dict = {}
+
+                for name, tensor in param_dict.items():
+                    if tensor is not None:
+                        migrated_dict[name] = config.to_device(tensor, target=target_device)
+
+                layer.set_parameters(**migrated_dict)
 
     def set_precision(self, compute_dtype):
         """

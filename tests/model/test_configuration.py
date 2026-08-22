@@ -52,21 +52,6 @@ class TestModelConfig(ModelBaseTestCase):
         self.assertEqual(opt.compiled_device, self.backend_name)
         self.assertEqual(acc.compiled_device, self.backend_name)
 
-    def test_device_migration_guardrails_and_compilation(self):
-        """Test backend device switching hooks and prevent post-finalize migrations."""
-        model = Model()
-        layer = SpyLifecycleLayer(self.NUM_FEATURES, 4)
-        model.add(layer)
-
-        model.to(self.backend_name)
-        self.assertEqual(model.device, self.backend_name)
-        self.assertEqual(layer.compiled_device, self.backend_name)
-
-        model.finalize((self.NUM_FEATURES,))
-
-        with self.assertRaises(RuntimeError):
-            model.to(self.backend_name)
-
     def test_precision_policy_dispatch(self):
         """Verify set_precision() dispatches to non-exempt layers and preserves exempt layers."""
         model = Model()
