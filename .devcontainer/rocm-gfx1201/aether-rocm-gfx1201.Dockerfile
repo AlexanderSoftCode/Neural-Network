@@ -8,10 +8,12 @@ FROM ubuntu:26.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# Target architecture configuration
 ENV ROCM_HOME=/opt/rocm \
     ROCM_PATH=/opt/rocm \
     HIP_PATH=/opt/rocm \
     AMDGPU_TARGETS=gfx1201 \
+    HCC_AMDGPU_TARGET=gfx1201 \
     GPU_TARGETS=gfx1201 \
     PATH="/opt/rocm/bin:${PATH}"
 
@@ -30,9 +32,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     git \
     sudo \
+    gosu \
     && mkdir --parents --mode=0755 /etc/apt/keyrings \
     && wget https://repo.amd.com/rocm/packages-multi-arch/gpg/rocm.gpg -O - | \
-       gpg --dearmor | tee /etc/apt/keyrings/amdrocm.gpg > /dev/null \
+       gpg --dearmor | \
+       tee /etc/apt/keyrings/amdrocm.gpg > /dev/null \
     && echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/amdrocm.gpg] https://repo.amd.com/rocm/packages-multi-arch/ubuntu2604 stable main" \
        > /etc/apt/sources.list.d/rocm.list \
     && rm -rf /var/lib/apt/lists/*
@@ -57,13 +61,19 @@ ENV VIRTUAL_ENV=/opt/venv
 RUN python3.14 -m venv $VIRTUAL_ENV
 ENV PATH="$VIRTUAL_ENV/bin:${PATH}"
 
+# 3a: Base build dependencies and utilities and normal prereqs
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel cython
+RUN pip install --no-cache-dir numpy safetensors jupyterlab
+
+# 3b: Compile CuPy from source targeting ROCm HIP gfx1201
 ENV CUPY_INSTALL_USE_HIP=1
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel cython && \
-    pip install --no-cache-dir numpy && \
-    pip install --no-cache-dir cupy jupyterlab
+RUN pip install --no-cache-dir --no-binary cupy cupy
+
+# 3d: Validation check
+RUN python -c "import cupy, safetensors, numpy; print(f'Build check passed: CuPy {cupy.__version__}, SafeTensors {safetensors.__version__}, NumPy {numpy.__version__}')"
 
 # ------------------------------------------------------------------------------
-# Step 4: Non-root User Setup & Workspace Directory
+# Step 4: User Setup & Restricted Sudo
 # ------------------------------------------------------------------------------
 RUN mkdir -p /app \
     && getent group video || groupadd video \
@@ -74,9 +84,10 @@ RUN mkdir -p /app \
     && chown -R ubuntu:ubuntu /app /opt/venv
 
 COPY --chmod=0755 .devcontainer/rocm-gfx1201/fix-gpu-groups.sh /usr/local/bin/fix-gpu-groups.sh
+COPY --chmod=0755 .devcontainer/rocm-gfx1201/entrypoint.sh /usr/local/bin/entrypoint.sh
 
 WORKDIR /app
 
 EXPOSE 8888
-
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["jupyter", "lab", "--ip=0.0.0.0", "--no-browser"]

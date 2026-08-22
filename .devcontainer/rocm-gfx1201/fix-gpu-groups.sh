@@ -14,11 +14,7 @@ set -euo pipefail
 #
 # Called by devcontainer.json's postStartCommand on every container start.
 # VS Code's Dev Containers CLI overrides the image's ENTRYPOINT/CMD with its
-# own keep-alive wrapper on every container it manages (confirmed via `docker
-# inspect` - Entrypoint shows /bin/sh regardless of what the Dockerfile sets),
-# so an image-level entrypoint isn't a reliable place for this logic.
-# postStartCommand is the lifecycle hook VS Code does respect, and it runs as
-# root here since the image has no USER directive.
+# own keep-alive wrapper on every container it manages 
 # ------------------------------------------------------------------------------
 
 TARGET_USER="${AETHER_CONTAINER_USER:-ubuntu}"

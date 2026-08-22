@@ -9,18 +9,19 @@
     "runArgs": [
         "--device=/dev/kfd",
         "--device=/dev/dri",
-        "--group-add=video",
-        "--group-add=render",
         "--ipc=host",
-        "--security-opt", "seccomp=unconfined",
+        "--security-opt", 
+        "seccomp=unconfined",
         "--shm-size=16G"
     ],
     "workspaceMount": "source=${localWorkspaceFolder},target=/app,type=bind",
     "workspaceFolder": "/app",
 
     "updateRemoteUserUID": false,
+    "remoteUser": "ubuntu",
 
     "postStartCommand": "sudo /usr/local/bin/fix-gpu-groups.sh",
+    "waitFor": "postStartCommand",
 
     "customizations": {
         "vscode": {
@@ -38,8 +39,6 @@
 
     "postCreateCommand": "pip install --no-build-isolation -e . --config-settings editable_mode=compat",
     
-    "remoteUser": "ubuntu",
-
     "portsAttributes": {
         "8888": {
             "label": "Jupyter Lab Server",
