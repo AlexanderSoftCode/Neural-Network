@@ -105,6 +105,17 @@ def build_kernel(factory, name=None):
         warnings.warn(f"[aether] build_kernel: '{name or getattr(factory, '__name__', '?')}' failed to compile: {e}")
         return None
 
+
+def resolve_gpu_launch_geometry():
+    """CUDA vs HIP variant + recommended total threads-per-block.
+    512 threads is recommended for HIP, 1024 for CUDA -- see pooling_kernel.py
+    and adam_kernel.py for how each consumer maps this onto their own grid shape.
+    """
+    is_hip = HAS_CUPY and xp.cuda.runtime.is_hip
+    variant = "hip" if is_hip else "cuda"
+    target_threads = 512 if is_hip else 1024
+    return variant, target_threads
+
 class DTypePolicy():
 
     def __init__ (self, compute_dtype: str | None = None) -> None:

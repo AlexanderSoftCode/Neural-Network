@@ -1,6 +1,8 @@
 import numpy as np
+from functools import partial
+
 import aether.config as config
-from aether.custom_kernels.adam_kernel import _adam_update_kernel
+from aether.custom_kernels import adam_kernel as gpu_adam
 
 class Optimizer:
     """Base class for all Aether ML optimizers.
@@ -71,6 +73,10 @@ class Adam(Optimizer):
         self.beta_2 = beta_2  # used to be known as our rho
 
         self._step_impl = self._step_fallback
+        # Bound in _compile_for_device: the memoized fused RawKernel and its
+        # vendor variant ('cuda'/'hip'). None on CPU/NumPy or if compilation failed.
+        self._adamw_kernel = None
+        self._variant = None
 
     def init_params(self, trainable_layers):
         """
@@ -90,14 +96,21 @@ class Adam(Optimizer):
 
     def _compile_for_device(self, device):
         """
-        Triggered by Model.to(device) to bind the fused-kernel GPU path
-        or the fallback.
+        Triggered by Model.to(device) to bind the fused single-kernel RawKernel
+        GPU path or the fallback. 
         """
-        if device == 'cupy' and _adam_update_kernel is not None:
-            self._step_impl = self._step_gpu
-        else:
-            self._step_impl = self._step_fallback
+        if device == 'cupy':
+            variant, block_size = config.resolve_gpu_launch_geometry()
+            kernel = gpu_adam._get_compiled_adamw_kernel(variant)
+            if kernel is not None:
+                self._variant = variant
+                self._adamw_kernel = kernel
+                self._step_impl = partial(self._step_gpu, block_size=block_size)
+                return
 
+        self._adamw_kernel = None
+        self._variant = None
+        self._step_impl = self._step_fallback
 
     def step(self):
         """Unified optimizer entry point executed once per training step"""
@@ -112,16 +125,20 @@ class Adam(Optimizer):
         self._step_impl(bias_correction_1, bias_correction_2)
 
         self.iterations += 1
+
     @staticmethod
     def _l1_subgradient(param, l1_lambda, xp):
-        """Sub-gradient of L1 regularization matching the +1-at-zero convention."""
+        """Sub-gradient of L1 regularization matching the +1-at-zero convention.
+        Used only by the CPU/NumPy fallback path -- the GPU path folds L1/L2
+        directly into the fused kernel instead (see _step_gpu / adam_kernel.py).
+        """
         return l1_lambda * xp.where(param < 0, -1.0, 1.0).astype(param.dtype)
 
     def _get_regularized_gradients(self, layer, xp):
         """
         Folds any *coupled* L1/L2 regularization configured on the
         layer itself (weight_regularizer_l1/l2, bias_regularizer_l1/l2)
-        into dweights/dbiases. 
+        into dweights/dbiases. CPU fallback path only -- see note above.
         """
         dweights = layer.dweights
         dbiases = layer.dbiases
@@ -139,63 +156,57 @@ class Adam(Optimizer):
         return dweights, dbiases
 
     def _resolve_weight_decay(self, layer):
-        """Resolves decoupled weight decay coefficient (AdamW)."""
+        """Resolves decoupled weight decay coefficient (AdamW).
+
+        Layers such as BatchNorm set no_weight_decay=True since gamma/beta
+        are 1D scale/shift parameters -- shrinking them toward zero degrades
+        the normalization math rather than regularizing anything.
+        """
         if getattr(layer, "no_weight_decay", False):
             return 0.0
         return getattr(self, "weight_decay", 0.0)
 
-    def _step_gpu(self, bias_correction_1, bias_correction_2):
-        """Fused CUDA / CuPy elementwise kernel path."""
-        xp = config.xp
+    def _step_gpu(self, bias_correction_1, bias_correction_2, block_size):
+        """
+        Fused single-kernel-per-tensor RawKernel path. L1/L2 regularization
+        and decoupled weight decay are handled in the same kernel launches here
+        """
+        kernel = self._adamw_kernel
 
-        # Cast all scalar hyperparameters to float32 once per step
-        learning_rate_scalar = np.float32(self.current_learning_rate)
-        beta_1_scalar = np.float32(self.beta_1)
-        beta_2_scalar = np.float32(self.beta_2)
-        epsilon_scalar = np.float32(self.epsilon)
-        bias_correction_1_scalar = np.float32(bias_correction_1)
-        bias_correction_2_scalar = np.float32(bias_correction_2)
-        zero_weight_decay_scalar = np.float32(0.0)
+        lr = np.float32(self.current_learning_rate)
+        beta1 = np.float32(self.beta_1)
+        beta2 = np.float32(self.beta_2)
+        eps = np.float32(self.epsilon)
+        bc1 = np.float32(bias_correction_1)
+        bc2 = np.float32(bias_correction_2)
 
         for layer in self.layers:
-            dweights, dbiases = self._get_regularized_gradients(layer, xp)
-            weight_decay_scalar = np.float32(self._resolve_weight_decay(layer))
+            weight_decay = np.float32(self._resolve_weight_decay(layer))
 
-            # Fused update for weights
-            _adam_update_kernel(
-                layer.weights,
-                dweights,
-                layer.weight_momentums,
-                layer.weight_cache,
-                learning_rate_scalar,
-                beta_1_scalar,
-                beta_2_scalar,
-                epsilon_scalar,
-                bias_correction_1_scalar,
-                bias_correction_2_scalar,
-                weight_decay_scalar,
-                layer.weights,
-                layer.weight_momentums,
-                layer.weight_cache,
+            # Weights (or BatchNorm gamma, aliased to layer.weights)
+            gpu_adam.launch_adamw_update(
+                kernel,
+                layer.weights, layer.dweights,
+                layer.weight_momentums, layer.weight_cache,
+                lr, beta1, beta2, eps, bc1, bc2,
+                weight_decay,
+                getattr(layer, "weight_regularizer_l1", 0.0),
+                getattr(layer, "weight_regularizer_l2", 0.0),
+                block_size=block_size
             )
 
-            # Fused update for biases (weight decay is always 0.0 for biases)
-            if getattr(layer, 'biases', None) is not None and dbiases is not None:
-                _adam_update_kernel(
-                    layer.biases,
-                    dbiases,
-                    layer.bias_momentums,
-                    layer.bias_cache,
-                    learning_rate_scalar,
-                    beta_1_scalar,
-                    beta_2_scalar,
-                    epsilon_scalar,
-                    bias_correction_1_scalar,
-                    bias_correction_2_scalar,
-                    zero_weight_decay_scalar,
-                    layer.biases,
-                    layer.bias_momentums,
-                    layer.bias_cache,
+            # Biases (or BatchNorm beta, aliased to layer.biases) --
+            # weight decay is always 0.0 here, independent of no_weight_decay.
+            if getattr(layer, 'biases', None) is not None and getattr(layer, 'dbiases', None) is not None:
+                gpu_adam.launch_adamw_update(
+                    kernel,
+                    layer.biases, layer.dbiases,
+                    layer.bias_momentums, layer.bias_cache,
+                    lr, beta1, beta2, eps, bc1, bc2,
+                    np.float32(0.0),
+                    getattr(layer, "bias_regularizer_l1", 0.0),
+                    getattr(layer, "bias_regularizer_l2", 0.0),
+                    block_size=block_size
                 )
 
             # Invalidate any low-precision compute casts stored on the layer
@@ -246,7 +257,7 @@ class Adam(Optimizer):
             # Invalidate any low-precision compute casts stored on the layer
             if hasattr(layer, "invalidate_shadow_caches"):
                 layer.invalidate_shadow_caches()
-                
+
 class AdamW(Adam):
     def __init__(self, learning_rate=.001, decay=0., epsilon=1e-7,
                  beta_1=0.9, beta_2=.999, weight_decay=0.01):

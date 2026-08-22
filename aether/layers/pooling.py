@@ -33,15 +33,6 @@ class _PoolNd(Layer):
 
         self.output_shape = (H_out, W_out, C_in)
         return self.output_shape
-    @staticmethod
-    def _resolve_gpu_variant():
-        """CUDA vs HIP variant + recommended launch block depth.
-        Block depth of 2 is recommended for HIP, 4 for CUDA.
-        """
-        is_hip = config.HAS_CUPY and config.xp.cuda.runtime.is_hip
-        variant = "hip" if is_hip else "cuda"
-        block_z = 2 if is_hip else 4
-        return variant, block_z
 
     def _get_padded_input(self, H_in, W_in):
         fH, fW = self.filter_size
@@ -229,7 +220,9 @@ class MaxPool2d(_PoolNd):
     def _compile_for_device(self, device):
         """Triggered by Model.to(device) to map low-level hardware paths."""
         if device == 'cupy' and gpu_pooling._is_gpu_pooling_available():
-            variant, block_z = self._resolve_gpu_variant()
+            variant, target_threads = config.resolve_gpu_launch_geometry()
+
+            block_z = 2 if target_threads == 512 else 4 # for 1024 threads
 
             kernel_train = gpu_pooling.get_max_pool2d_forward_kernel(variant, training=True)
             kernel_infer = gpu_pooling.get_max_pool2d_forward_kernel(variant, training=False)
@@ -348,8 +341,8 @@ class AvgPool2d(_PoolNd):
     def _compile_for_device(self, device):
         """Triggered by Model.to(device) to map low-level hardware paths."""
         if device == 'cupy' and gpu_pooling._is_gpu_pooling_available():
-            variant, block_z = self._resolve_gpu_variant()
-
+            variant, target_threads = config.resolve_gpu_launch_geometry()
+            block_z = 2 if target_threads == 512 else 4 # for 1024
             kernel_forward = gpu_pooling.get_avg_pool2d_forward_kernel(variant)
             kernel_backward = gpu_pooling.get_avg_pool2d_backward_kernel(variant)
 

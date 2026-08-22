@@ -3,6 +3,7 @@ from aether.base import Layer
 
 class BatchNorm(Layer):
     _precision_exempt: bool = True
+    no_weight_decay: bool = True    # decaying towards zero breaks normalization math
     def __init__ (self, epsilon = 1e-5, momentum = 0.9):
         super().__init__()
         self.epsilon = epsilon
