@@ -1,9 +1,10 @@
-from aether._lazy import install_lazy_attrs
+from aether._utils._lazy import install_lazy_attrs
 from aether.layers import _LAYER_MODULES
 from aether.losses import _LOSS_MODULES
 from aether.metrics import _ACC_MODULES
 from aether.optimizers import _OPTIMIZER_MODULES
 from aether.preprocessing import _PREPROCESSING_MODULES
+
 _MODEL_MODULES = {
     "Model": "aether.model",
 }

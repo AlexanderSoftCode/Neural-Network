@@ -8,16 +8,20 @@ HAS_CUPY = False
 
 try:
     import cupy as cp
-    HAS_CUPY = True
-    get_array_module = cp.get_array_module
-
-except (ImportError, ModuleNotFoundError):
+    if cp.cuda.is_available() and cp.cuda.runtime.getDeviceCount() > 0:
+        HAS_CUPY = True
+        get_array_module = cp.get_array_module
+    else:
+        HAS_CUPY = False
+        cp = None
+except Exception:
     HAS_CUPY = False
     cp = None
 
+if not HAS_CUPY:
     def get_array_module(*args, **kwargs):
         return np
-
+    
 xp = cp if HAS_CUPY else np
 
 # Used to have bfloat16, but currently isn't stable for this framework

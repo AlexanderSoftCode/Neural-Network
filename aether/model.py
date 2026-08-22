@@ -6,9 +6,10 @@ import aether.config as config
 import aether.layers as layer_module
 
 from aether.base import Layer
-from aether.losses import Loss, SoftmaxCategoricalCrossEntropy
+from aether.losses import Loss
 from aether.metrics import Accuracy
 from aether.optimizers import Optimizer
+from aether._utils import NullAccuracy, NullOptimizer
 
 try:
     import safetensors.numpy
@@ -23,6 +24,7 @@ class Model():
         self.optimizer = None
         self.accuracy = None
         self._seed = None
+        self._predict_activation = None
 
     def add(self, layer):
         if self.is_finalized:   
@@ -164,7 +166,7 @@ class Model():
             raise RuntimeError("[aether] Cannot finalize an empty model. Please add layers via Model.add() first.")
 
         current_shape = input_shape
-
+        
         for idx, layer in enumerate(self.layers):
             layer_seed = (self._seed + idx) if self._seed is not None else None
             
@@ -185,14 +187,11 @@ class Model():
         ]
 
         if self.loss is not None:
-            last_layer = self.layers[-1]
-            if isinstance(self.loss, SoftmaxCategoricalCrossEntropy) and isinstance(last_layer, layer_module.SoftMax):
-                raise ValueError(
-                    "[aether] 'SoftmaxCategoricalCrossEntropy' operates directly on unnormalized logits (S, C). "
-                    "Do not add an explicit 'SoftMax' activation layer to the model."
-                )
-
+            self.loss.validate_graph(layers=self.layers)
             self.loss.remember_trainable_layers(self.trainable_layers)
+
+            if self.loss.has_fused_activation:
+                self._predict_activation = self.loss.activation
 
         if self.optimizer is not None:
             if not hasattr(self.optimizer, "step") or not hasattr(self.optimizer, "init_params"):
@@ -201,8 +200,13 @@ class Model():
                     "'init_params(trainable_layers)' and 'step()'."
                 )
             self.optimizer.init_params(self.trainable_layers)
-            self._step_optimizer = self.optimizer.step
-                
+        else:
+            self.optimizer = NullOptimizer()
+
+        self._step_optimizer = self.optimizer.step
+
+        if self.accuracy is None:
+            self.accuracy = NullAccuracy()
         self._sync_device()
         self.is_finalized = True
 
@@ -253,6 +257,7 @@ class Model():
         *,
         epochs=1,
         batch_size=None,
+        shuffle=True,
         print_every=1,
         verbose = True,
         validation_data=None
@@ -268,6 +273,13 @@ class Model():
             y (ndarray): Target labels or one-hot ground truths.
             epochs (int): Number of full passes over the dataset.
             batch_size (int, optional): Mini-batch sample size. Defaults to None (full-batch).
+            shuffle (bool, optional): If True (default), draws a fresh sample-index
+                permutation every epoch on the active device backend and gathers
+                mini-batches from it via fancy indexing, so sample order differs
+                epoch to epoch without ever copying or reordering the full X/y
+                arrays. If False, mini-batches are taken as contiguous, zero-copy
+                slices in dataset order every epoch. Never applied to
+                `validation_data` -- evaluation order doesn't affect the metric.
             print_every (int): Step interval frequency for logging telemetry.
             verbose (bool, optional): If True, prints training loss and accuracy metrics to stdout. Defaults to True. 
             validation_data (tuple, optional): (X_val, y_val) tuple for out-of-sample testing.
@@ -277,9 +289,16 @@ class Model():
                 "[aether] Model must be explicitly finalized before training. "
                 "Call model.finalize(input_shape) first."
             )
+        if self.loss is None:
+            raise RuntimeError(
+                "[aether] Cannot train a model without a loss function."
+                "Pass in a valid loss function to model.configure(loss=...) before finalize & train"
+            )
         self._assert_device_alignment(X, y)
         if validation_data is not None: 
             self._assert_device_alignment(validation_data[0], validation_data[1])
+
+        xp = config.get_array_module(X)
 
         num_samples = len(X)
         effective_batch_size = batch_size if batch_size is not None else num_samples
@@ -290,97 +309,62 @@ class Model():
             for step in range(train_steps)
         ]
 
-        # -----------------------------------------------------------------
-        # 2. Local Namespace Binding (Attribute caching to eliminate lookup latency)
-        # -----------------------------------------------------------------
+        if shuffle:
+            def get_batch(epoch_indices, start_idx, end_idx):
+                batch_idx = epoch_indices[start_idx:end_idx]
+                return X[batch_idx], y[batch_idx]
+        else:
+            def get_batch(epoch_indices, start_idx, end_idx):
+                return X[start_idx:end_idx], y[start_idx:end_idx]
+
         forward_fn = self.forward
         backward_fn = self.backward
         loss = self.loss
         accuracy = self.accuracy
-        step_optimizer = getattr(self, "_step_optimizer", None)
+        step_optimizer = self._step_optimizer
 
-        has_loss = loss is not None
-        has_acc = accuracy is not None
-        has_opt = callable(step_optimizer)
-
-        has_reg = False
-        if has_loss and hasattr(loss, "regularization_loss"):
-            has_reg = any(
-                getattr(layer, "weight_regularizer_l1", 0.0) > 0.0
-                or getattr(layer, "weight_regularizer_l2", 0.0) > 0.0
-                or getattr(layer, "bias_regularizer_l1", 0.0) > 0.0
-                or getattr(layer, "bias_regularizer_l2", 0.0) > 0.0
-                for layer in getattr(self, "trainable_layers", [])
-            )
+        has_reg = hasattr(loss, "regularization_loss") and any(
+            getattr(layer, "weight_regularizer_l1", 0.0) > 0.0
+            or getattr(layer, "weight_regularizer_l2", 0.0) > 0.0
+            or getattr(layer, "bias_regularizer_l1", 0.0) > 0.0
+            or getattr(layer, "bias_regularizer_l2", 0.0) > 0.0
+            for layer in getattr(self, "trainable_layers", [])
+        )
         reg_loss_fn = loss.regularization_loss if has_reg else None
 
-        if has_loss and has_acc and has_opt:
-            if has_reg:
-                def run_step(batch_X, batch_y):
-                    out = forward_fn(batch_X, training=True)
-                    data_l = loss.calculate(out, batch_y)
-                    reg_l = reg_loss_fn()
-                    acc_l = accuracy.calculate(out, batch_y)
-                    loss.backward(out, batch_y)
-                    backward_fn(loss.dinputs)
-                    step_optimizer()
-                    return data_l, reg_l, acc_l
-            else:
-                def run_step(batch_X, batch_y):
-                    out = forward_fn(batch_X, training=True)
-                    data_l = loss.calculate(out, batch_y)
-                    acc_l = accuracy.calculate(out, batch_y)
-                    loss.backward(out, batch_y)
-                    backward_fn(loss.dinputs)
-                    step_optimizer()
-                    return data_l, 0.0, acc_l
-
-        elif has_loss and has_opt:
-            if has_reg:
-                def run_step(batch_X, batch_y):
-                    out = forward_fn(batch_X, training=True)
-                    data_l = loss.calculate(out, batch_y)
-                    reg_l = reg_loss_fn()
-                    loss.backward(out, batch_y)
-                    backward_fn(loss.dinputs)
-                    step_optimizer()
-                    return data_l, reg_l, 0.0
-            else:
-                def run_step(batch_X, batch_y):
-                    out = forward_fn(batch_X, training=True)
-                    data_l = loss.calculate(out, batch_y)
-                    loss.backward(out, batch_y)
-                    backward_fn(loss.dinputs)
-                    step_optimizer()
-                    return data_l, 0.0, 0.0
-        else:
-            # Generic fallback
+        if has_reg:
             def run_step(batch_X, batch_y):
                 out = forward_fn(batch_X, training=True)
-                data_l = loss.calculate(out, batch_y) if has_loss else 0.0
-                reg_l = reg_loss_fn() if has_reg else 0.0
-                acc_l = accuracy.calculate(out, batch_y) if has_acc else 0.0
-                if has_loss:
-                    loss.backward(out, batch_y)
-                    backward_fn(loss.dinputs)
-                if has_opt:
-                    step_optimizer()
+                data_l = loss.calculate(out, batch_y)
+                reg_l = reg_loss_fn()
+                acc_l = accuracy.calculate(out, batch_y)
+                loss.backward(out, batch_y)
+                backward_fn(loss.dinputs)
+                step_optimizer()
                 return data_l, reg_l, acc_l
+        else:
+            def run_step(batch_X, batch_y):
+                out = forward_fn(batch_X, training=True)
+                data_l = loss.calculate(out, batch_y)
+                acc_l = accuracy.calculate(out, batch_y)
+                loss.backward(out, batch_y)
+                backward_fn(loss.dinputs)
+                step_optimizer()
+                return data_l, 0.0, acc_l
 
-        get_lr = None
-        if self.optimizer is not None:
-            opt = self.optimizer
-            get_lr = lambda: getattr(opt, "current_learning_rate", getattr(opt, "lr", None))
+        opt = self.optimizer
+        get_lr = lambda: getattr(opt, "current_learning_rate", getattr(opt, "lr", None))
 
         for epoch in range(1, epochs + 1):
-            if has_loss:
-                loss.new_pass()
-            if has_acc:
-                accuracy.new_pass()
+            loss.new_pass()
+            accuracy.new_pass()
+
+            # Fresh permutation per epoch -- a single small 1D index array on
+            # the active device, never a copy/reorder of the full X/y tensors.
+            epoch_indices = xp.random.permutation(num_samples) if shuffle else None
 
             for step, (start_idx, end_idx) in enumerate(batch_slices):
-                batch_X = X[start_idx:end_idx]
-                batch_y = y[start_idx:end_idx]
+                batch_X, batch_y = get_batch(epoch_indices, start_idx, end_idx)
 
                 data_loss, reg_loss, acc_val = run_step(batch_X, batch_y)
 
@@ -391,11 +375,8 @@ class Model():
                     s_loss = s_data_loss + s_reg_loss
                     s_acc = float(acc_val)
 
-                    lr_str = ""
-                    if get_lr is not None:
-                        lr = get_lr()
-                        if lr is not None:
-                            lr_str = f" - lr: {float(lr):.6f}"
+                    lr = get_lr()
+                    lr_str = f" - lr: {float(lr):.6f}" if lr is not None else ""
 
                     print(
                         f"Epoch {epoch}/{epochs} | Step {step + 1}/{train_steps} "
@@ -403,19 +384,12 @@ class Model():
                         f"- acc: {s_acc:.4f}{lr_str}"
                     )
 
-            if has_loss:
-                accum = loss.calculate_accumulated(include_regularization=has_reg)
-                epoch_loss = float(accum[0] + accum[1]) if isinstance(accum, tuple) else float(accum)
-            else:
-                epoch_loss = 0.0
+            accum = loss.calculate_accumulated(include_regularization=has_reg)
+            epoch_loss = float(accum[0] + accum[1]) if isinstance(accum, tuple) else float(accum)
+            epoch_acc = float(accuracy.calculate_accumulated())
 
-            epoch_acc = float(accuracy.calculate_accumulated()) if has_acc else 0.0
-
-            lr_summary = ""
-            if get_lr is not None:
-                lr = get_lr()
-                if lr is not None:
-                    lr_summary = f" - lr: {float(lr):.6f}"
+            lr = get_lr()
+            lr_summary = f" - lr: {float(lr):.6f}" if lr is not None else ""
             if verbose and print_every:
                 print(
                     f"[Epoch {epoch}/{epochs} Total] "
@@ -425,7 +399,7 @@ class Model():
             if validation_data is not None:
                 X_val, y_val = validation_data
                 self.evaluate(X_val, y_val, batch_size=batch_size, verbose=verbose)
-
+                
     def evaluate(self, X_val, y_val, *, batch_size=None, verbose=True):
         """
         Evaluate the model's loss and metrics on validation/test data in inference mode.
@@ -445,6 +419,7 @@ class Model():
                 "[aether] Model must be explicitly finalized before evaluation. "
                 "Call model.finalize(input_shape) first."
             )
+        self._assert_device_alignment(X_val, y_val)
         num_samples = len(X_val)
         effective_batch_size = batch_size if batch_size is not None else num_samples
         eval_steps = (num_samples + effective_batch_size - 1) // effective_batch_size
@@ -490,7 +465,7 @@ class Model():
 
         return val_loss, val_acc
 
-    def predict(self, X, *, batch_size=None, return_logits=False):
+    def predict(self, X, *, batch_size=None, return_logits=False, stream_to_host=True):
         """
         Run batch inference on inputs and return model predictions.
 
@@ -502,9 +477,13 @@ class Model():
             batch_size (int, optional): Mini-batch sample size. Defaults to None (full-batch).
             return_logits (bool, optional): If True, returns raw network logits
                 even if an output activation was fused into the loss. Defaults to False.
+            stream_to_host (bool, optional): If True, incrementally transfers batch
+                outputs to host memory (NumPy) to minimize GPU VRAM consumption.
+                Defaults to True.
 
         Returns:
             ndarray: Model predictions (probabilities or stacked batch outputs).
+
         Raises:
             RuntimeError: If model has not been explicitly finalized before calling predict().
         """
@@ -520,25 +499,31 @@ class Model():
         prediction_steps = (num_samples + effective_batch_size - 1) // effective_batch_size
 
         forward_fn = self.forward
-        outputs = []
+        activation = self._predict_activation
+        apply_activation = (not return_logits) and (activation is not None)
+
+        output_module = np if stream_to_host else xp
+        output_buffer = None
 
         for step in range(prediction_steps):
             start_idx = step * effective_batch_size
             end_idx = min(start_idx + effective_batch_size, num_samples)
 
-            batch_X = X[start_idx:end_idx]
-            batch_output = forward_fn(batch_X, training=False)
-            outputs.append(batch_output)
+            batch_output = forward_fn(X[start_idx:end_idx], training=False)
+            if apply_activation:
+                act_out = activation.forward(batch_output, training=False)
+                batch_output = act_out if act_out is not None else activation.output
 
-        result = xp.vstack(outputs)
+            if output_buffer is None:
+                output_buffer = output_module.empty(
+                    (num_samples,) + batch_output.shape[1:], dtype=batch_output.dtype
+                )
 
-        if not return_logits:
-            loss_activation = getattr(self.loss, "activation", None)
-            if loss_activation is not None and hasattr(loss_activation, "forward"):
-                act_out = loss_activation.forward(result, training=False)
-                result = act_out if act_out is not None else getattr(loss_activation, "output", result)
+            output_buffer[start_idx:end_idx] = (
+                config.to_device(batch_output, target="numpy") if stream_to_host else batch_output
+            )
 
-        return result
+        return output_buffer
 
     def save(self, filepath: str):
         """
@@ -562,7 +547,7 @@ class Model():
                 "Install it with `pip install safetensors`."
             )
 
-        # 1. Capture Top-Level Config & Layer Manifest
+        # Capture Top-Level Config & Layer Manifest
         input_shape = self.layers[0].input_shape
         precision_str = (
             self.precision_policy.compute_dtype_name
@@ -585,7 +570,6 @@ class Model():
             ],
         }
 
-        # 2. Extract & Normalize Weights (Always CPU NumPy & C-Contiguous)
         weight_dict = {}
         for idx, layer in enumerate(self.layers):
             for name, tensor in layer.get_parameters().items():
@@ -594,7 +578,6 @@ class Model():
                 cpu_array = config.to_device(tensor, target="numpy")
                 weight_dict[f"{idx}.{name}"] = np.ascontiguousarray(cpu_array)
 
-        # 3. Serialize to Uncompressed/Deflated Zip Bundle
         weights_bytes = safetensors.numpy.save(weight_dict)
         arch_json_bytes = json.dumps(arch_manifest, indent=2).encode("utf-8")
 
@@ -624,15 +607,9 @@ class Model():
                 "Install it with `pip install safetensors`."
             )
 
-        # -------------------------------------------------------------
-        # 1. Resolve Target Hardware Device
-        # -------------------------------------------------------------
         active_backend = "cupy" if getattr(config.xp, "__name__", "") == "cupy" else "numpy"
         target_device = device if device is not None else active_backend
 
-        # -------------------------------------------------------------
-        # 2. Unpack Zip Archive in Memory
-        # -------------------------------------------------------------
         with zipfile.ZipFile(filepath, "r") as zipf:
             arch_bytes = zipf.read("architecture.json")
             weights_bytes = zipf.read("weights.safetensors")
@@ -640,9 +617,6 @@ class Model():
         manifest = json.loads(arch_bytes.decode("utf-8"))
         raw_weights = safetensors.numpy.load(weights_bytes)
 
-        # -------------------------------------------------------------
-        # 3. Reconstruct Model Graph & Layers
-        # -------------------------------------------------------------
         model = cls()
 
         if manifest.get("seed") is not None:
@@ -666,17 +640,11 @@ class Model():
 
             model.add(layer_cls(**sanitized_cfg))
 
-        # -------------------------------------------------------------
-        # 4. Hardware Backend Migration & Graph Finalization
-        # -------------------------------------------------------------
         model.to(target_device)
 
         input_shape = tuple(manifest["input_shape"])
         model.finalize(input_shape=input_shape)
 
-        # -------------------------------------------------------------
-        # 5. Group & Hydrate Parameters into Layers
-        # -------------------------------------------------------------
         layer_param_map: dict[int, dict] = {}
         for flat_key, array in raw_weights.items():
             if "." not in flat_key:
@@ -695,9 +663,6 @@ class Model():
             if idx < len(model.layers):
                 model.layers[idx].set_parameters(**params)
 
-        # -------------------------------------------------------------
-        # 6. Apply Precision Policy
-        # -------------------------------------------------------------
         if manifest.get("precision_policy") is not None:
             model.set_precision(manifest["precision_policy"])
 

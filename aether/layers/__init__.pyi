@@ -11,7 +11,7 @@ __all__ = [
     "Conv2d",
     "ReLU",
     "LeakyReLU",
-    "Softmax",
+    "SoftMax",
     "MaxPool2d",
     "AvgPool2d",
     "GlobalAvgPool",

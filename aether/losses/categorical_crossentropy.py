@@ -27,6 +27,7 @@ def _cce_per_sample_loss(xp, probs_clip, y_true_sparse, n_classes, label_smoothi
 
 class Loss:
     prohibited_preceding_layers = ()  # Default: base loss forbids nothing
+    has_fused_activation = False
     def __init__(self):
         self.new_pass()
 
@@ -133,6 +134,7 @@ class CategoricalCrossEntropy(Loss):
 
 class SoftmaxCategoricalCrossEntropy(Loss):
     prohibited_preceding_layers = (SoftMax,)
+    has_fused_activation = True
     def __init__(self, label_smoothing = 0.0):
         super().__init__()
         self.activation = SoftMax()
