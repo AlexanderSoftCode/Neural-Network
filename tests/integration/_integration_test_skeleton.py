@@ -25,16 +25,7 @@ Notes for anyone extending this skeleton:
 import unittest
 import aether as ae
 import aether.config as config
-from tests.base_case import AetherBaseTestCase
-
-backends_to_test = ['numpy']
-# GPU check & loading loop
-try:
-    import cupy as cp
-    backends_to_test.append('cupy')
-except (ImportError, Exception):
-    pass  # Fall back onto the NumPy suite if CUDA/ROCm isn't present
-
+from tests.base_case import AetherBaseTestCase, BACKENDS_TO_TEST
 
 # Dynamic Factory Class Generation for Integration Tests
 def make_integration_suite(backend_name):
@@ -62,6 +53,7 @@ def make_integration_suite(backend_name):
             # Build your architecture here, e.g.:
             #
             # self.model = ae.Model()
+            # self.manual_seed()
             # self.model.add(ae.Flatten())
             # self.model.add(ae.Dense(28 * 28 * 1, 32))
             # self.model.add(ae.ReLU())
@@ -71,6 +63,7 @@ def make_integration_suite(backend_name):
             #     optimizer=ae.Adam(),
             #     accuracy=ae.CategoricalAccuracy(),
             # )
+            # self.model.set_precision()
             # self.model.to(self.backend_name)   # BEFORE finalize()
             # self.model.finalize()
 
@@ -100,6 +93,6 @@ def make_integration_suite(backend_name):
 
 
 # Global Registration for Test Discovery
-for backend in backends_to_test:
+for backend in BACKENDS_TO_TEST:
     suite_cls = make_integration_suite(backend_name=backend)
     globals()[suite_cls.__name__] = suite_cls

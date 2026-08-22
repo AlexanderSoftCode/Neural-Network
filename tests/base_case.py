@@ -5,9 +5,19 @@ from aether.config import set_backend
 import aether.config as config
 
 try:
-    import cupy as cp
+    import safetensors.numpy as safetensors_np
+    HAS_SAFETENSORS = True
 except ImportError:
-    cp = None
+    safetensors_np = None
+    HAS_SAFETENSORS = False
+
+BACKENDS_TO_TEST = ['numpy']
+if config.HAS_CUPY:
+    BACKENDS_TO_TEST.append('cupy')
+
+if config.HAS_CUPY:
+    import cupy as cp
+
 
 class AetherBaseTestCase(unittest.TestCase):
     """
@@ -15,38 +25,31 @@ class AetherBaseTestCase(unittest.TestCase):
     pointers and standard environment cleaning methods between hardware
     backend swaps.
     """
-    __test__ = False  # Suppress standalone discovery of the base class
+    __test__ = False  # Suppress standalone discovery of the base class (pytest only, see note above)
+    backend_name = "numpy"  # Fallback default backend
 
     def __init_subclass__(cls, *args, **kwargs):
         super().__init_subclass__(*args, **kwargs)
-        
-        if cls.__name__ == 'AetherBaseLayerTestCase':
-            cls.__test__ = False
-        else:
-            cls.__test__ = True
+        # Suppress test runners from registering intermediate base classes
+        cls.__test__ = not ("Base" in cls.__name__)
+
+    def setUp(self):
+        super().setUp()
+
+        # Reads self.backend_name set by class definition
+        config.set_backend(backend_name=self.backend_name)
+        self.xp = config.xp
 
     def shortDescription(self):
         """Docstrings are ommitted when running verbose -v unit tests"""
         return None
-    def tearDown(self):
-        """Reset tracking state to system NumPy default safely between tests."""
-        if config.HAS_CUPY:
-            cp.cuda.Stream.null.synchronize()
-            cp.get_default_memory_pool().free_all_blocks()
-            cp.get_default_pinned_memory_pool().free_all_blocks()
-        set_backend(backend_name='numpy')
-
-
-class AetherBaseLayerTestCase(AetherBaseTestCase):
-    """Base class for layers/activations/loss modules"""
-    __test__ = False 
 
     def make_built_layer(self, layer_cls, input_shape: tuple[int, ...], seed: int | None = None, **kwargs):
         """Constructs, binds to the active device backend, and builds a layer instance.
 
         This test helper standardizes the parameterized layer lifecycle by first
-        instantiating the layer, triggering device compilation/runtime pointer 
-        rebinding if supported, and finally executing the layer's build routine to 
+        instantiating the layer, triggering device compilation/runtime pointer
+        rebinding if supported, and finally executing the layer's build routine to
         allocate parameter buffers and compute output spatial shapes.
 
         Args:
@@ -83,6 +86,7 @@ class AetherBaseLayerTestCase(AetherBaseTestCase):
 
         layer.build(input_shape, seed=seed)
         return layer
+
     def make_component(self, component_cls, **kwargs):
         """Instantiates any non-layer aether-component (e.g. Loss, Optimizer, etc.)
         and compiles backend_specific-kernels if supported.
@@ -91,9 +95,22 @@ class AetherBaseLayerTestCase(AetherBaseTestCase):
         if hasattr(instance, "_compile_for_device"):
             instance._compile_for_device(self.backend_name)
         return instance
+
+    def tearDown(self):
+        """Reset tracking state to system NumPy default safely between tests."""
+        if config.HAS_CUPY:
+            cp.cuda.Stream.null.synchronize()
+            cp.get_default_memory_pool().free_all_blocks()
+            cp.get_default_pinned_memory_pool().free_all_blocks()
+        set_backend(backend_name='numpy')
+
+class AetherBaseLayerTestCase(AetherBaseTestCase):
+    """Base class for layers/activations/loss modules"""
+    __test__ = False
+
     def set_precision(self, layer, compute_dtype):
         """Helper mirroring Model.set_precision behavior for an individual layer."""
-        # Since I find them annoying, we'll ignore the known emulation warnings after 
+        # Since I find them annoying, we'll ignore the known emulation warnings after
         # test setup
         with warnings.catch_warnings():
             warnings.filterwarnings(
@@ -108,21 +125,31 @@ class AetherBaseLayerTestCase(AetherBaseTestCase):
                 layer._apply_precision(policy)
         return policy
 
-    def test_backend_pointer_swap(self):
-        """Verify the layer/test environment successfully routes to the correct backend execution hooks."""
-        super().setUp()
-        if not hasattr(self, 'xp'):
-            import numpy as np
-            self.xp = np
-        if "CUPY" in self.__class__.__name__.upper():
-            self.assertEqual(
-                self.xp.__name__, 
-                "cupy", 
-                "Test class marked as CUPY, but self.xp is not Cupy!"
-            )
-        else:
-            self.assertEqual(
-                self.xp.__name__, 
-                "numpy", 
-                "Test class marked for CPU/NumPy, but self.xp is not Numpy!"
-            )
+def register_test_suites(target_globals, template_cls):
+    """
+    Generates backend subclasses in globals and removes the base template
+    (and any of its discoverable TestCase ancestors) so test runners only
+    see and execute the backend-specific suites.
+    """
+    for ancestor in template_cls.__mro__:
+        if (
+            issubclass(ancestor, unittest.TestCase)
+            and ancestor.__dict__.get("__test__", None) is False
+            and target_globals.get(ancestor.__name__) is ancestor
+        ):
+            target_globals.pop(ancestor.__name__, None)
+
+    target_globals.pop(template_cls.__name__, None)
+
+    for backend in BACKENDS_TO_TEST:
+        class_name = f"{template_cls.__name__}_{backend.upper()}"
+        subclass = type(
+            class_name,
+            (template_cls,),
+            {
+                "backend_name": backend,
+                "__test__": True,
+                "__module__": template_cls.__module__,
+            },
+        )
+        target_globals[class_name] = subclass

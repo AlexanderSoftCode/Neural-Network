@@ -1,121 +1,100 @@
 import aether.config as config
-from tests.base_case import AetherBaseLayerTestCase
+import tests.base_case as base_case
 
 from aether.layers.activations import ReLU
-TARGET_LAYER = ReLU
 
-backends_to_test = ['numpy']
-try:
-    import cupy as cp
-    backends_to_test.append('cupy')
 
-except (ImportError, Exception):
-    pass  
+class TestReLU(base_case.AetherBaseLayerTestCase):
+    def setUp(self):
+        super().setUp()
+        self.layer = self.make_built_layer(
+            ReLU, input_shape=(3,)
+        )
 
-def make_suite(backend_name, Layer_Class):
+    def test_forward_pass(self):
+        """Verify that the layer correctly outputs max(0, x)."""
 
-    class_name = f"Test_{Layer_Class.__name__}_{backend_name.upper()}"
-    class TestReLU(AetherBaseLayerTestCase):
-        def setUp(self):
-            self.backend_name = backend_name
-            config.set_backend(backend_name=self.backend_name)
-            self.xp = config.xp
-            
-            self.layer = self.make_built_layer(
-                Layer_Class, input_shape=(3,)
-            )
+        # Setup input with negative, zero, and positive values
+        inputs = self.xp.array([
+            [-3.0, -1.0, 0.0],
+            [0.5, 2.0, 5.0]
+        ], dtype=self.xp.float32)
 
-        def test_forward_pass(self):
-            """Verify that the layer correctly outputs max(0, x)."""
-            
-            # Setup input with negative, zero, and positive values
-            inputs = self.xp.array([
-                [-3.0, -1.0, 0.0], 
-                [0.5, 2.0, 5.0]
-            ], dtype=self.xp.float32)
-            
-            expected_output = self.xp.array([
-                [0.0, 0.0, 0.0], 
-                [0.5, 2.0, 5.0]
-            ], dtype=self.xp.float32)
-            
-            # Execute forward pass using the instance layer
-            self.layer.forward(inputs, training=False)
-            
-            actual_output = self.layer.output
-            
-            self.xp.testing.assert_array_almost_equal(
-                actual_output, 
-                expected_output, 
-                decimal=4,
-                err_msg="Forward pass failed: did not clamp negative values correctly."
-            )
+        expected_output = self.xp.array([
+            [0.0, 0.0, 0.0],
+            [0.5, 2.0, 5.0]
+        ], dtype=self.xp.float32)
 
-        def test_backward_pass(self):
-            """Verify that gradients only flow through positive input paths."""
-            
-            # Inputs to dictate the active/inactive mask
-            inputs = self.xp.array([
-                [-2.0, 0.0, 1.0, 3.0]
-            ], dtype=self.xp.float32)
-            
-            # Upstream gradients received from the next layer
-            dvalues = self.xp.array([
-                [0.5, 0.5, 0.5, 0.5]
-            ], dtype=self.xp.float32)
-            
-            # Expected: 0 gradient for inputs <= 0, and passed-through gradient for inputs > 0
-            expected_dinputs = self.xp.array([
-                [0.0, 0.0, 0.5, 0.5]
-            ], dtype=self.xp.float32)
-            
-            self.layer.forward(inputs, training=False)
-            self.layer.backward(dvalues)
-            
-            actual_dinputs = self.layer.dinputs
-            
-            self.xp.testing.assert_array_almost_equal(
-                actual_dinputs, 
-                expected_dinputs, 
-                decimal=4,
-                err_msg="Backward pass failed: gradient routing mismatch."
-            )
+        # Execute forward pass using the instance layer
+        self.layer.forward(inputs, training=False)
 
-        def test_forward_does_not_mutate_input(self):
-            """Forward pass should not alter incoming inputs."""
-            layer = self.make_built_layer(Layer_Class, input_shape=(4,))
-            inputs = self.xp.array([
-                [-2.0, 0.0, 1.0, 3.0]
-            ], dtype=self.xp.float32)
-            original_inputs = inputs.copy()
+        actual_output = self.layer.output
+        self.xp.testing.assert_array_almost_equal(
+            actual_output,
+            expected_output,
+            decimal=4,
+            err_msg="Forward pass failed: did not clamp negative values correctly."
+        )
 
-            layer.forward(inputs, training=False)
-            self.xp.testing.assert_array_equal(inputs, original_inputs)
+    def test_backward_pass(self):
+        """Verify that gradients only flow through positive input paths."""
 
-        def test_backward_does_not_mutate_dvalues(self):
-            """Backward pass should not alter incoming dvalues."""
-            layer = self.make_built_layer(Layer_Class, input_shape=(4,))
+        # Inputs to dictate the active/inactive mask
+        inputs = self.xp.array([
+            [-2.0, 0.0, 1.0, 3.0]
+        ], dtype=self.xp.float32)
 
-            inputs = self.xp.array([
-                [-2.0, 0.0, 1.0, 3.0]
-            ], dtype=self.xp.float32)
+        # Upstream gradients received from the next layer
+        dvalues = self.xp.array([
+            [0.5, 0.5, 0.5, 0.5]
+        ], dtype=self.xp.float32)
 
-            layer.forward(inputs, training=True)
+        # Expected: 0 gradient for inputs <= 0, and passed-through gradient for inputs > 0
+        expected_dinputs = self.xp.array([
+            [0.0, 0.0, 0.5, 0.5]
+        ], dtype=self.xp.float32)
 
-            dvalues = self.xp.array([
-                [0.5, 1.5, -2.0, 3.0]
-            ], dtype=self.xp.float32)
-            original_dvalues = dvalues.copy()
+        self.layer.forward(inputs, training=False)
+        self.layer.backward(dvalues)
 
-            layer.backward(dvalues)
+        actual_dinputs = self.layer.dinputs
 
-            self.xp.testing.assert_array_equal(dvalues, original_dvalues)
-    TestReLU.__name__ = class_name
-    TestReLU.__qualname__ = class_name
-            
-    return TestReLU
+        self.xp.testing.assert_array_almost_equal(
+            actual_dinputs,
+            expected_dinputs,
+            decimal=4,
+            err_msg="Backward pass failed: gradient routing mismatch."
+        )
 
-for backend in backends_to_test:
-    class_name = f"Test_{TARGET_LAYER.__name__}_{backend.upper()}"
+    def test_forward_does_not_mutate_input(self):
+        """Forward pass should not alter incoming inputs."""
+        layer = self.make_built_layer(ReLU, input_shape=(4,))
+        inputs = self.xp.array([
+            [-2.0, 0.0, 1.0, 3.0]
+        ], dtype=self.xp.float32)
+        original_inputs = inputs.copy()
 
-    globals()[class_name] = make_suite(backend_name=backend, Layer_Class=TARGET_LAYER)
+        layer.forward(inputs, training=False)
+        self.xp.testing.assert_array_equal(inputs, original_inputs)
+
+    def test_backward_does_not_mutate_dvalues(self):
+        """Backward pass should not alter incoming dvalues."""
+        layer = self.make_built_layer(ReLU, input_shape=(4,))
+
+        inputs = self.xp.array([
+            [-2.0, 0.0, 1.0, 3.0]
+        ], dtype=self.xp.float32)
+
+        layer.forward(inputs, training=True)
+
+        dvalues = self.xp.array([
+            [0.5, 1.5, -2.0, 3.0]
+        ], dtype=self.xp.float32)
+        original_dvalues = dvalues.copy()
+
+        layer.backward(dvalues)
+
+        self.xp.testing.assert_array_equal(dvalues, original_dvalues)
+
+
+base_case.register_test_suites(globals(), TestReLU)

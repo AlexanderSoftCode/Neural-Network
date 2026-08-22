@@ -4,47 +4,30 @@ Shared fixture-building helpers for Model-level integration tests.
 import math
 import aether as ae
 import aether.config as config
-from tests.base_case import AetherBaseTestCase
-
-backends_to_test = ['numpy']
-try:
-    import cupy as cp
-    backends_to_test.append('cupy')
-except (ImportError, Exception):
-    pass
+import tests.base_case as base_case
 
 
-class ModelIntegrationBaseCase(AetherBaseTestCase):
+class ModelIntegrationBaseCase(base_case.AetherBaseTestCase):
     __test__ = False
 
     NUM_CLASSES = 10
     SEED = 42
 
-    # ---- synthetic data -------------------------------------------------
-
     def make_synthetic_image_data(self, n_samples=16, height=32, width=32, channels=3):
-        # Reads the active backend set by config.set_backend(), which may be overwritten during a unit-test
-        xp = config.xp
-        xp.random.seed(self.SEED)
-        X = xp.random.randn(n_samples, height, width, channels).astype(xp.float32)
-        y = xp.random.randint(0, self.NUM_CLASSES, size=(n_samples,)).astype(xp.int64)
+        self.xp.random.seed(self.SEED)
+        X = self.xp.random.randn(n_samples, height, width, channels).astype(self.xp.float32)
+        y = self.xp.random.randint(0, self.NUM_CLASSES, size=(n_samples,)).astype(self.xp.int64)
         return X, y
-    
-    # ---- verified architectures ------------------------------------------
 
-    def build_cnn_model(self, *, precision=None, device=None, input_dim=(32, 32, 3)):
-        """
-        Verified CNN architecture:
-        Conv -> MaxPool2d -> ReLU -> Conv -> AvgPool2d -> LeakyReLU -> SpatialDropout ->
-        GlobalAvgPool -> Dense, trained with the fused
-        SoftmaxCategoricalCrossEntropy loss (no explicit SoftMax layer).
-        """
+    def build_cnn_model(self, *, device=None, precision=None, input_dim=(32, 32, 3)):
+        target_device = device if device is not None else self.backend_name
         model = ae.Model()
+        model.to(self.backend_name)
         model.add(ae.Conv2d(3, 32, (3, 3), (1, 1), padding="same"))
         model.add(ae.MaxPool2d((2, 2), (2, 2), padding="valid"))
         model.add(ae.ReLU())
         model.add(ae.Conv2d(32, 64, (3, 3), (1, 1), padding="same"))
-        model.add(ae.AvgPool2d((2,2), (2, 2), padding="valid"))
+        model.add(ae.AvgPool2d((2, 2), (2, 2), padding="valid"))
         model.add(ae.LeakyReLU(alpha=0.01))
         model.add(ae.SpatialDropout(rate=0.05, seed=self.SEED))
         model.add(ae.GlobalAvgPool())
@@ -54,15 +37,15 @@ class ModelIntegrationBaseCase(AetherBaseTestCase):
             optimizer=ae.Adam(learning_rate=0.001, decay=5e-5),
             accuracy=ae.CategoricalAccuracy(),
         )
-        return self._place_and_finalize(model, precision=precision, device=device, input_dim=input_dim)
+        model.to(device=target_device)
+        model.manual_seed(seed=42)
+        
+        return self._place_and_finalize(model, precision=precision, input_dim=input_dim)
 
-    def build_mlp_model(self, *, precision=None, device=None, input_dim=(32, 32, 3)):
-        """
-        Verified MLP architecture:
-        Flatten -> Dense -> ReLU -> Dense, trained with the fused
-        SoftmaxCategoricalCrossEntropy loss.
-        """
+    def build_mlp_model(self, *, device=None, precision=None, input_dim=(32, 32, 3)):
+        target_device = device if device is not None else self.backend_name
         model = ae.Model()
+        model.to(self.backend_name)
         model.add(ae.Flatten())
         model.add(ae.Dense(math.prod(input_dim), 128))
         model.add(ae.ReLU())
@@ -72,14 +55,12 @@ class ModelIntegrationBaseCase(AetherBaseTestCase):
             optimizer=ae.Adam(learning_rate=0.001, decay=5e-5),
             accuracy=ae.CategoricalAccuracy(),
         )
-        return self._place_and_finalize(model, precision=precision, device=device, input_dim=input_dim)
+        model.to(device=target_device)
+        model.manual_seed(seed=42)
+        return self._place_and_finalize(model, precision=precision, input_dim=input_dim)
 
     @staticmethod
-    def _place_and_finalize(model, *, precision, device, input_dim):
-
-        if device is not None:
-            model.to(device)
-
+    def _place_and_finalize(model, *, precision, input_dim):
         if precision is not None:
             model.set_precision(compute_dtype=precision)
         model.finalize(input_shape=input_dim)
