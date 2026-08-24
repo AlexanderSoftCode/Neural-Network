@@ -7,6 +7,7 @@ from tests.integration.model_base_suite import ModelIntegrationBaseCase
 
 
 class TestDeviceMigration(ModelIntegrationBaseCase):
+    BATCH_SIZE = 8
 
     def test_pointer_swap_binds_gpu_paths_after_to_cupy(self):
         """Every layer with _compile_for_device should have its forward
@@ -34,10 +35,60 @@ class TestDeviceMigration(ModelIntegrationBaseCase):
                         ),
                     )
 
-    # TODO: Add cross-backend forward and weight-parity integration tests.
-    # Currently, Model.to() is enforced strictly before Model.finalize() to guarantee
-    # zero-copy deterministic tensor allocation. Live cross-device synchronization
-    # (e.g. migrating finalized CPU graphs to GPU) is deferred until parameter migration
-    # utilities and optimizer buffer rebinding are fully standardized.
+    def test_post_migration_from_gpu_to_cpu(self):
+        if self.backend_name != "cupy":
+            self.skipTest("Pointer-swap only meaningfully diverges on the CuPy backend.")
 
+        model = self.build_mlp_model(device="cupy")
+        X, y = self.make_synthetic_image_data()
+        model.train(X, y, epochs=1, batch_size=self.BATCH_SIZE, verbose=False)
+
+        # 1. Capture GPU baseline
+        gpu_baseline = model.predict(X, return_logits=True, stream_to_host=False)
+        gpu_baseline_cpu = config.to_device(gpu_baseline, target="numpy")
+
+        # 2. Migrate model and inputs to CPU
+        model.to(device="numpy")
+        X_cpu = config.to_device(X, target="numpy")
+
+        # 3. Predict on CPU
+        cpu_out = model.predict(X_cpu, return_logits=True)
+
+        # 4. Assert parity on host memory
+        np.testing.assert_allclose(gpu_baseline_cpu, cpu_out, rtol=1e-4, atol=1e-4)
+
+    def test_post_finalization_from_cpu_to_gpu(self):
+
+        if not config.HAS_CUPY or self.backend_name != "cupy":
+            self.skipTest("Cross-backend migration requires CuPy to be active.")
+
+        model = self.build_mlp_model(device="numpy")
+        X, _ = self.make_synthetic_image_data()
+        X_cpu = config.to_device(X, target="numpy")
+        cpu_out = model.forward(X_cpu, training=False)
+
+        model.to("cupy")
+        X_gpu = config.to_device(X_cpu, target="cupy")
+        gpu_out = model.forward(X_gpu, training=False)
+
+        self.assertIsInstance(gpu_out, self.xp.ndarray)
+
+        gpu_out_cpu = config.to_device(gpu_out, target="numpy")
+        np.testing.assert_allclose(gpu_out_cpu, cpu_out, rtol=1e-4, atol=1e-4)
+
+    def test_device_mismatch_protection_after_migration(self):
+        if not config.HAS_CUPY or self.backend_name != "cupy":
+            self.skipTest("Cross-backend migration requires CuPy to be active.")
+
+        model = self.build_mlp_model(device="cupy")
+        X, y = self.make_synthetic_image_data()
+        X_gpu = config.to_device(X, target="cupy")
+        y_gpu = config.to_device(y, target="cupy")
+        model.to("numpy")
+
+        with self.assertRaises(TypeError):
+            model.predict(X_gpu)
+
+        with self.assertRaises(TypeError):
+            model.evaluate(X_gpu, y_gpu, verbose=False)
 register_test_suites(globals(), TestDeviceMigration)

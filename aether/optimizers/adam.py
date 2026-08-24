@@ -146,12 +146,12 @@ class Adam(Optimizer):
         if layer.weight_regularizer_l1 > 0:
             dweights = dweights + self._l1_subgradient(layer.weights, layer.weight_regularizer_l1, xp)
         if layer.weight_regularizer_l2 > 0:
-            dweights = dweights + 2.0 * layer.weight_regularizer_l2 * layer.weights
+            dweights = dweights + layer.weight_regularizer_l2 * layer.weights
 
         if layer.bias_regularizer_l1 > 0:
             dbiases = dbiases + self._l1_subgradient(layer.biases, layer.bias_regularizer_l1, xp)
         if layer.bias_regularizer_l2 > 0:
-            dbiases = dbiases + 2.0 * layer.bias_regularizer_l2 * layer.biases
+            dbiases = dbiases + layer.bias_regularizer_l2 * layer.biases
 
         return dweights, dbiases
 

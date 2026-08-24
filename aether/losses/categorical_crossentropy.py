@@ -83,13 +83,13 @@ class Loss:
                 regularization_loss += layer.weight_regularizer_l1 * \
                                         xp.sum(xp.abs(weights_fp32))
             if layer.weight_regularizer_l2 > 0:
-                regularization_loss += layer.weight_regularizer_l2 * \
+                regularization_loss += 0.5 * layer.weight_regularizer_l2 * \
                                         xp.sum(weights_fp32 * weights_fp32)
             if layer.bias_regularizer_l1 > 0:
                 regularization_loss += layer.bias_regularizer_l1 * \
                                         xp.sum(xp.abs(biases_fp32))
             if layer.bias_regularizer_l2 > 0:
-                regularization_loss += layer.bias_regularizer_l2 * \
+                regularization_loss += 0.5 * layer.bias_regularizer_l2 * \
                                         xp.sum(biases_fp32 * biases_fp32) 
         return regularization_loss
 

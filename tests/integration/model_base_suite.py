@@ -22,7 +22,6 @@ class ModelIntegrationBaseCase(base_case.AetherBaseTestCase):
     def build_cnn_model(self, *, device=None, precision=None, input_dim=(32, 32, 3)):
         target_device = device if device is not None else self.backend_name
         model = ae.Model()
-        model.to(self.backend_name)
         model.add(ae.Conv2d(3, 32, (3, 3), (1, 1), padding="same"))
         model.add(ae.MaxPool2d((2, 2), (2, 2), padding="valid"))
         model.add(ae.ReLU())
@@ -37,7 +36,7 @@ class ModelIntegrationBaseCase(base_case.AetherBaseTestCase):
             optimizer=ae.Adam(learning_rate=0.001, decay=5e-5),
             accuracy=ae.CategoricalAccuracy(),
         )
-        model.to(device=target_device)
+        model.to(device if device is not None else self.backend_name)
         model.manual_seed(seed=42)
         
         return self._place_and_finalize(model, precision=precision, input_dim=input_dim)
@@ -45,7 +44,6 @@ class ModelIntegrationBaseCase(base_case.AetherBaseTestCase):
     def build_mlp_model(self, *, device=None, precision=None, input_dim=(32, 32, 3)):
         target_device = device if device is not None else self.backend_name
         model = ae.Model()
-        model.to(self.backend_name)
         model.add(ae.Flatten())
         model.add(ae.Dense(math.prod(input_dim), 128))
         model.add(ae.ReLU())
@@ -55,7 +53,7 @@ class ModelIntegrationBaseCase(base_case.AetherBaseTestCase):
             optimizer=ae.Adam(learning_rate=0.001, decay=5e-5),
             accuracy=ae.CategoricalAccuracy(),
         )
-        model.to(device=target_device)
+        model.to(device if device is not None else self.backend_name)
         model.manual_seed(seed=42)
         return self._place_and_finalize(model, precision=precision, input_dim=input_dim)
 
