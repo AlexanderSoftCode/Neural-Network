@@ -4,56 +4,55 @@ import aether.config as config
 
 # --- Fused Adam/AdamW update kernel ----------------------------------------------
 
-_ADAMW_UPDATE_TEMPLATE = Template(r'''
+_ADAM_W_TEMPLATE = Template(r'''
 $hip_include
 extern "C" __global__
 void $kernel_name(
     float* __restrict__ param,
     const float* __restrict__ grad,
-    float* __restrict__ momentum,
-    float* __restrict__ cache,
+    float* __restrict__ m,
+    float* __restrict__ v,
     const float lr,
-    const float beta1,
-    const float beta2,
+    const float b1,
+    const float b2,
     const float eps,
-    const float bias_correction1,
-    const float bias_correction2,
+    const float bc1,
+    const float bc2,
     const float weight_decay,
     const float l1_reg,
     const float l2_reg,
-    const int size
+    const int N
 ) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= size) return;
+    int out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (out_idx >= N) return;
 
-    float p = param[idx];
-    float g = grad[idx];
+    float g = grad[out_idx];
+    float p = param[out_idx];
+    float m_val = m[out_idx];
+    float v_val = v[out_idx];
 
     if (l1_reg > 0.0f) {
         g += l1_reg * (p < 0.0f ? -1.0f : 1.0f);
     }
     if (l2_reg > 0.0f) {
-        g += 2.0f * l2_reg * p;
+        g += l2_reg * p;
     }
-
-    float m = beta1 * momentum[idx] + (1.0f - beta1) * g;
-    float v = beta2 * cache[idx] + (1.0f - beta2) * (g * g);
-    momentum[idx] = m;
-    cache[idx] = v;
-
-    float m_hat = m / bias_correction1;
-    float v_hat = v / bias_correction2;
-
-    // Decoupled weight decay (AdamW), applied directly to the parameter
-    // BEFORE the adaptive step.
     if (weight_decay > 0.0f) {
         p -= lr * weight_decay * p;
     }
 
+    m_val = b1 * m_val + (1.0f - b1) * g;
+    v_val = b2 * v_val + (1.0f - b2) * (g * g);
+
+    float m_hat = m_val / bc1;
+    float v_hat = v_val / bc2;
+
     p -= lr * m_hat / (sqrtf(v_hat) + eps);
 
-    param[idx] = p;
-}
+    param[out_idx] = p;
+    m[out_idx] = m_val;
+    v[out_idx] = v_val;
+}   
 ''')
 
 _ADAMW_CUDA = dict(hip_include="")
@@ -75,7 +74,7 @@ def _get_compiled_adamw_kernel(variant: str):
 
     vendor = _ADAMW_HIP if variant == "hip" else _ADAMW_CUDA
     kernel_name = f"fused_adamw_update_{variant}_kernel"
-    source = _ADAMW_UPDATE_TEMPLATE.substitute(
+    source = _ADAM_W_TEMPLATE.substitute(
         kernel_name=kernel_name,
         **vendor,
     )
