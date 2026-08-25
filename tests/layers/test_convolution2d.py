@@ -374,73 +374,98 @@ class TestConvLayer(base_case.AetherBaseLayerTestCase):
                 # FP16 Tensor Cores introduce minor precision differences vs FP32 einsum
                 self.xp.testing.assert_allclose(gpu_out, fallback_out, rtol=1e-2, atol=1e-2)
 
-    def test_conv_gpu_backward_dbias_parity(self):
-        """Verify numerical equivalence for dbiases between _backward_gpu and _backward_fallback"""
+    GEMM_REL_TOL = 5e-3
+
+    def _assert_gemm_close(self, actual, desired, name, tol=None):
+        """Norm-relative comparison: max|actual - desired| / max|desired|."""
+        tol = self.GEMM_REL_TOL if tol is None else tol
+        scale = float(self.xp.max(self.xp.abs(desired)))
+        if scale == 0.0:
+            scale = 1.0
+        rel = float(self.xp.max(self.xp.abs(actual - desired))) / scale
+        self.assertLessEqual(
+            rel, tol,
+            f"{name}: relative error {rel:.3e} exceeds {tol:.1e} "
+            f"(max|ref|={scale:.3e})",
+        )
+
+    def _run_dweight_kernel_parity(self, S, spatial, in_channels, out_channels,
+                                   stride=None, padding=None):
+        """Drive the fused dweight kernel once and check both of its outputs.
+
+        conv_backward_dweight_wmma emits dweights AND dbiases from a single
+        launch -- the bias reduction rides along on the dY tile the GEMM has
+        already staged. They are therefore checked together, off one launch,
+        rather than as two independent tests.
+        """
         if self.backend_name != 'cupy':
             self.skipTest("CuPy backend required for GPU kernel tests")
         from aether.custom_kernels import conv_kernel
         if not conv_kernel.get_is_conv_gpu_available():
             self.skipTest("Matrix-core GPU kernels not available on this device")
 
-        layer = self.make_built_layer(
-            Conv2d,
-            input_shape = (8, 8, self.IN_CHANNELS),
-            in_channels=self.IN_CHANNELS,
-            out_channels=2,
-            filter_size=self.FILTER_SIZE,
-            stride=self.STRIDE,
-            padding=self.PADDING
-        )
-
-        fixed_input = self.xp.random.randn(2, 8, 8, self.IN_CHANNELS).astype(self.xp.float32)
-        dvalues = self.xp.random.randn(2, 8, 8, 2).astype(self.xp.float32)
-
-        # 1. Run Fallback End-to-End
-        layer._forward_fallback(fixed_input, training=False)
-        layer._backward_fallback(dvalues)
-        fallback_dbiases = layer.dbiases.copy()
-
-        # 2. Run GPU End-to-End
-        layer._forward_gpu(fixed_input, training=False)
-        layer._backward_gpu(dvalues)
-        gpu_dbiases = layer.dbiases.copy()
-
-        # FP32 exact accumulation check
-        self.xp.testing.assert_allclose(gpu_dbiases, fallback_dbiases, rtol=1e-5, atol=1e-5)
-
-    def test_conv_gpu_backward_dweight_parity(self):
-        """Verify numerical equivalence for dweights between _backward_gpu and _backward_fallback"""
-        if self.backend_name != 'cupy':
-            self.skipTest("CuPy backend required for GPU kernel tests")
-        from aether.custom_kernels import conv_kernel
-        if not conv_kernel.get_is_conv_gpu_available():
-            self.skipTest("Matrix-core GPU kernels not available on this device")
+        stride = stride or self.STRIDE
+        padding = padding or self.PADDING
+        H, W = spatial
 
         layer = self.make_built_layer(
             Conv2d,
-            input_shape = (8, 8, self.IN_CHANNELS),
-            in_channels=self.IN_CHANNELS,
-            out_channels=2,
+            input_shape=(H, W, in_channels),
+            in_channels=in_channels,
+            out_channels=out_channels,
             filter_size=self.FILTER_SIZE,
-            stride=self.STRIDE,
-            padding=self.PADDING
+            stride=stride,
+            padding=padding,
         )
 
-        fixed_input = self.xp.random.randn(2, 8, 8, self.IN_CHANNELS).astype(self.xp.float32)
-        dvalues = self.xp.random.randn(2, 8, 8, 2).astype(self.xp.float32)
+        fixed_input = self.xp.random.randn(S, H, W, in_channels).astype(self.xp.float32)
+        meta = layer._get_shape_meta((H, W, in_channels))
+        dvalues = self.xp.random.randn(
+            S, meta.H_out, meta.W_out, out_channels
+        ).astype(self.xp.float32)
 
-        # 1. Run Fallback End-to-End
         layer._forward_fallback(fixed_input, training=False)
         layer._backward_fallback(dvalues)
         fallback_dweights = layer.dweights.copy()
+        fallback_dbiases = layer.dbiases.copy()
 
-        # 2. Run GPU End-to-End
         layer._forward_gpu(fixed_input, training=False)
         layer._backward_gpu(dvalues)
         gpu_dweights = layer.dweights.copy()
+        gpu_dbiases = layer.dbiases.copy()
 
-        # WMMA FP16 vs FP32 tensordot tolerance comparison
-        self.xp.testing.assert_allclose(gpu_dweights, fallback_dweights, rtol=1e-2, atol=1e-2)
+        self.assertEqual(gpu_dweights.shape, fallback_dweights.shape)
+        self.assertEqual(gpu_dbiases.shape, fallback_dbiases.shape)
+
+        self._assert_gemm_close(gpu_dweights, fallback_dweights, "dweights")
+        self._assert_gemm_close(gpu_dbiases, fallback_dbiases, "dbiases")
+
+        dvalues_fp16 = dvalues.astype(self.xp.float16).astype(self.xp.float32)
+        ref_dbiases = self.xp.sum(dvalues_fp16, axis=(0, 1, 2))
+        self.xp.testing.assert_allclose(gpu_dbiases, ref_dbiases, rtol=1e-5, atol=1e-5)
+
+    def test_conv_gpu_backward_dweight_kernel_parity(self):
+        """Fused dweight kernel: dweights and dbiases against the fallback."""
+        self._run_dweight_kernel_parity(
+            S=2, spatial=(8, 8), in_channels=self.IN_CHANNELS, out_channels=2
+        )
+
+    def test_conv_gpu_backward_dweight_kernel_parity_multichannel(self):
+        """Same, on a shape whose K_TOTAL and C_OUT span several block tiles.
+
+        The 8x8x1 -> 2 case above fits inside one 64x64 output tile, so it
+        never exercises the grid.x/grid.y tiling or the ragged tail masking.
+        """
+        self._run_dweight_kernel_parity(
+            S=4, spatial=(16, 16), in_channels=8, out_channels=48
+        )
+
+    def test_conv_gpu_backward_dweight_kernel_parity_valid_strided(self):
+        """Same, with valid padding and a stride > 1."""
+        self._run_dweight_kernel_parity(
+            S=2, spatial=(16, 16), in_channels=4, out_channels=8,
+            stride=(2, 2), padding="valid",
+        )
 
     def test_conv_gpu_backward_dinput_parity(self):
         """Verify numerical equivalence for dinputs between _backward_gpu and _backward_fallback"""
