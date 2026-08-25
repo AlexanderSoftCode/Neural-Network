@@ -219,7 +219,7 @@ class MaxPool2d(_PoolNd):
 
     def _compile_for_device(self, device):
         """Triggered by Model.to(device) to map low-level hardware paths."""
-        if device == 'cupy' and gpu_pooling._is_gpu_pooling_available():
+        if device == 'cupy' and config.HAS_CUPY:
             variant, target_threads = config.resolve_gpu_launch_geometry()
 
             block_z = 2 if target_threads == 512 else 4 # for 1024 threads
@@ -340,7 +340,7 @@ class AvgPool2d(_PoolNd):
 
     def _compile_for_device(self, device):
         """Triggered by Model.to(device) to map low-level hardware paths."""
-        if device == 'cupy' and gpu_pooling._is_gpu_pooling_available():
+        if device == 'cupy' and config.HAS_CUPY:
             variant, target_threads = config.resolve_gpu_launch_geometry()
             block_z = 2 if target_threads == 512 else 4 # for 1024
             kernel_forward = gpu_pooling.get_avg_pool2d_forward_kernel(variant)
@@ -541,7 +541,7 @@ class GlobalAvgPool(Layer):
 
     def _compile_for_device(self, device):
 
-        if device == "cupy" and gpu_pooling._is_gpu_pooling_available():
+        if device == "cupy" and config.HAS_CUPY:
             variant, block_z = self._resolve_gpu_variant()
 
             self.kernel_forward = gpu_pooling.get_gap_forward_kernel(variant)

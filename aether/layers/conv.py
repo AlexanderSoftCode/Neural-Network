@@ -134,55 +134,28 @@ class Conv2d(Layer):
         self._fp16_weight_valid = False
 
     def _get_shape_meta(self, spatial_shape):
-        """Retrieves cached launch parameters using spatial/channel dimensions
-        AND the current stride/padding config (excluding batch S)."""
-        fH, fW = self.filter_size
-        sH, sW = self.stride
-
-        pad_h = (fH - 1) // 2 if self.padding == "same" else 0
-        pad_w = (fW - 1) // 2 if self.padding == "same" else 0
-
-        H_in, W_in, C_in = spatial_shape
-        cache_key = (H_in, W_in, C_in, sH, sW, pad_h, pad_w)
+        """Cached ConvShapeMeta for a spatial input shape (batch-independent)."""
+        cache_key = (spatial_shape, self.filter_size, self.stride, self.padding)
 
         cached = self._launch_cache.get(cache_key)
         if cached is not None:
             return cached
 
-        H_out = int((H_in + 2 * pad_h - fH) / sH + 1)
-        W_out = int((W_in + 2 * pad_w - fW) / sW + 1)
-
-        shape_meta = conv_kernel.ConvShapeMeta(
-            H_in=H_in, W_in=W_in, C_in=C_in, C_out=self.C_out,
-            fH=fH, fW=fW, sH=sH, sW=sW, pad_h=pad_h, pad_w=pad_w,
-            H_out=H_out, W_out=W_out, is_hip=conv_kernel._is_hip_backend(),
+        shape_meta = conv_kernel.ConvShapeMeta.create(
+            spatial_shape, self.C_out, self.filter_size, self.stride, self.padding
         )
-
-        compiled = conv_kernel.get_compiled_forward_conv_kernel(shape_meta)
-        if compiled is None:
-            return None
-
-        kernel, launch_meta = compiled
-
-        meta = {
-            "kernel": kernel,
-            "block_dim": launch_meta["block"],
-            "block_tile_m": launch_meta["block_tile_m"],
-            "block_tile_n": launch_meta["block_tile_n"],
-            "H_out": H_out,
-            "W_out": W_out,
-        }
-
-        self._launch_cache[cache_key] = meta
-        return meta
+        self._launch_cache[cache_key] = shape_meta
+        return shape_meta
 
     def _forward_gpu(self, inputs, training):
         xp = config.get_array_module(inputs)
         S, H_in, W_in, C_in = inputs.shape
-        meta = self._get_shape_meta((H_in, W_in, C_in))
+
+        shape_meta = self._get_shape_meta((H_in, W_in, C_in))
+        plan = conv_kernel.plan_forward_launch(shape_meta, S)
 
         # Fall back if JIT failed or shape isn't supported by Matrix Cores
-        if meta is None:
+        if plan is None:
             self.forward = self._forward_fallback
             return self._forward_fallback(inputs, training)
 
@@ -191,100 +164,49 @@ class Conv2d(Layer):
         if not self._fp16_weight_valid:
             self._refresh_fp16_weights(xp)
 
-        H_out, W_out = meta["H_out"], meta["W_out"]
-        M_total = np.int64(S * H_out * W_out)
-
-        grid_dim = (
-            int(-(-M_total // meta["block_tile_m"])),
-            int(-(-self.C_out // meta["block_tile_n"])),
+        self.output = xp.empty(
+            (S, shape_meta.H_out, shape_meta.W_out, self.C_out), dtype=xp.float32
         )
 
-        self.output = xp.empty((S, H_out, W_out, self.C_out), dtype=xp.float32)
+        plan(inputs_fp16, self._fp16_weight_cache, self.biases, self.output)
 
-        kernel_args = (
-            inputs_fp16,
-            self._fp16_weight_cache,
-            self.biases,
-            self.output,
-            M_total,
-        )
-
-        meta["kernel"](grid_dim, meta["block_dim"], kernel_args)
         self.inputs = inputs
         return self.output
 
     def _backward_gpu(self, dvalues):
-        xp = config.get_array_module(dvalues)
+        xp = config.xp
         S, H_in, W_in, C_in = self.inputs.shape
         fH, fW = self.filter_size
-        sH, sW = self.stride
 
-        pad_h = (fH - 1) // 2 if self.padding == "same" else 0
-        pad_w = (fW - 1) // 2 if self.padding == "same" else 0
+        shape_meta = self._get_shape_meta((H_in, W_in, C_in))
+        dw_plan = conv_kernel.plan_dweight_launch(shape_meta, S)
+        dx_plan = conv_kernel.plan_dinput_launch(shape_meta, S)
 
-        H_out = int((H_in + 2 * pad_h - fH) / sH + 1)
-        W_out = int((W_in + 2 * pad_w - fW) / sW + 1)
-
-        # Build shape metadata signature
-        shape_meta = conv_kernel.ConvShapeMeta(
-            H_in=H_in, W_in=W_in, C_in=C_in, C_out=self.C_out,
-            fH=fH, fW=fW, sH=sH, sW=sW, pad_h=pad_h, pad_w=pad_w,
-            H_out=H_out, W_out=W_out, is_hip=conv_kernel._is_hip_backend(),
-        )
-
-        # Retrieve compiled kernels
-        dw_compiled = conv_kernel.get_compiled_backward_dweight_kernel(shape_meta)
-        dx_compiled = conv_kernel.get_compiled_backward_dinput_kernel(shape_meta)
-        db_compiled = conv_kernel.get_compiled_backward_dbias_kernel(shape_meta)
-
-        # Fall back if any GPU compile fails
-        if dw_compiled is None or dx_compiled is None or db_compiled is None:
+        if dw_plan is None or dx_plan is None:
             raise RuntimeError(
                 f"Failed to compile GPU backward kernels for Conv shape "
-                f"(H_in={H_in}, W_in={W_in}, C_in={C_in}, C_out={self.C_out}). "
-                f"Cannot fall back to CPU because forward pass executed on GPU."
+                f"(H_in={H_in}, W_in={W_in}, C_in={C_in}, C_out={self.C_out})."
             )
 
-        M_total = np.int64(S * H_out * W_out)
-        K_total = fH * fW * C_in
-
-        # Prepare FP16 inputs for matrix-core WMMA operations
         dvalues_fp32 = dvalues.astype(xp.float32, copy=False)
         dvalues_bounded = xp.clip(dvalues_fp32, -65504.0, 65504.0)
         dvalues_fp16 = dvalues_bounded.astype(xp.float16, copy=False)
-
         inputs_fp16 = self.inputs.astype(xp.float16, copy=False)
 
         if not self._fp16_weight_valid:
             self._refresh_fp16_weights(xp)
 
-        # --- 1. Bias Gradients (dbias) ---
-        db_kernel, db_launch = db_compiled
-        self.dbiases = xp.empty(self.C_out, dtype=xp.float32)
-        grid_db = (int(-(-self.C_out // db_launch["block"][0])),)
-        db_kernel(grid_db, db_launch["block"], (dvalues_fp32, self.dbiases, M_total, np.int32(self.C_out)))
-
-        # --- 2. Weight Gradients (dweight) ---
-        dw_kernel, dw_launch = dw_compiled
+        # Both backward epilogues accumulate atomically, so the destinations
+        # must start at zero.
+        self.dbiases = xp.zeros((self.C_out,), dtype=xp.float32)
         self.dweights = xp.zeros((fH, fW, C_in, self.C_out), dtype=xp.float32)
-        grid_dw = (
-            int(-(-K_total // dw_launch["block_tile_m"])),
-            int(-(-self.C_out // dw_launch["block_tile_n"])),
-        )
-        dw_kernel(grid_dw, dw_launch["block"], (inputs_fp16, dvalues_fp16, self.dweights, M_total))
-
-        # --- 3. Input Gradients (dinput) ---
-        dx_kernel, dx_launch = dx_compiled
-        # Must be initialized to 0 because conv_backward_dinput_wmma uses atomicAdd
         self.dinputs = xp.zeros_like(self.inputs, dtype=xp.float32)
-        grid_dx = (
-            int(-(-M_total // dx_launch["block_tile_m"])),
-            int(-(-K_total // dx_launch["block_tile_n"])),
-        )
-        dx_kernel(grid_dx, dx_launch["block"], (dvalues_fp16, self._fp16_weight_cache, self.dinputs, M_total))
+
+        dw_plan(inputs_fp16, dvalues_fp16, self.dweights, self.dbiases)
+        dx_plan(dvalues_fp16, self._fp16_weight_cache, self.dinputs)
 
         return self.dinputs
-    
+
     def _forward_fallback(self, inputs, training):
         
         xp = config.get_array_module(inputs)

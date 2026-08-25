@@ -34,7 +34,7 @@ class Dense(Layer):
         self._inputs_compute = None
         self._weights_compute = None 
 
-    def build(self, input_shape: tuple[int, ...], seed: int | None = None) -> tuple[int, ...]:    
+    def build(self, input_shape: tuple[int, ...], seed: int | None = None) -> tuple[int, ...]:
         """
         Called once by Model.finalize(). config.xp is guaranteed to be
         correctly set if the user called model.to() beforehand.

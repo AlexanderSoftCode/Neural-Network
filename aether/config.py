@@ -5,12 +5,15 @@ import warnings
 xp = np
 as_strided = np.lib.stride_tricks.as_strided
 HAS_CUPY = False
-
+IS_HIP = False
+IS_CUDA = False
 try:
     import cupy as cp
     if cp.cuda.is_available() and cp.cuda.runtime.getDeviceCount() > 0:
         HAS_CUPY = True
         get_array_module = cp.get_array_module
+        IS_HIP = bool(cp.cuda.runtime.is_hip)
+        IS_CUDA = not IS_HIP
     else:
         HAS_CUPY = False
         cp = None
@@ -108,13 +111,52 @@ def build_kernel(factory, name=None):
 
 def resolve_gpu_launch_geometry():
     """CUDA vs HIP variant + recommended total threads-per-block.
-    512 threads is recommended for HIP, 1024 for CUDA -- see pooling_kernel.py
-    and adam_kernel.py for how each consumer maps this onto their own grid shape.
+    512 threads is recommended for HIP, 1024 for CUDA -- see pooling_kernel.py adam_kernel.py
+    or batch_norm_kernel.py for how each consumer maps this onto their own grid shape.
     """
-    is_hip = HAS_CUPY and xp.cuda.runtime.is_hip
-    variant = "hip" if is_hip else "cuda"
-    target_threads = 512 if is_hip else 1024
+    variant = "hip" if IS_HIP else "cuda"
+    target_threads = 512 if IS_HIP else 1024
     return variant, target_threads
+
+_TENSOR_CORE_CAPABLE = None
+
+def get_tensor_core_capable():
+    """Check if GPU supports tensor/matrix cores for optimized kernels.
+
+    HIP: requires gfx9, gfx11, or gfx12 (RDNA and newer).
+    CUDA: requires compute capability >= 70 (Volta and newer).
+
+    Returns False if CuPy unavailable or probe fails.
+    """
+    global _TENSOR_CORE_CAPABLE
+    if _TENSOR_CORE_CAPABLE is not None:
+        return _TENSOR_CORE_CAPABLE
+
+    if not HAS_CUPY:
+        _TENSOR_CORE_CAPABLE = False
+        return False
+
+    try:
+        device = cp.cuda.Device()
+        if IS_HIP:
+            props = cp.cuda.runtime.getDeviceProperties(device.id)
+            arch = props['gcnArchName']
+            arch = arch.decode() if isinstance(arch, bytes) else arch
+            _TENSOR_CORE_CAPABLE = (
+                arch.startswith('gfx9') or
+                arch.startswith('gfx11') or
+                arch.startswith('gfx12')
+            )
+        else:
+            cc = int(device.compute_capability)
+            _TENSOR_CORE_CAPABLE = cc >= 70
+    except Exception as e:
+        warnings.warn(
+            f"[aether] tensor core capability probe failed: {e}"
+        )
+        _TENSOR_CORE_CAPABLE = False
+
+    return _TENSOR_CORE_CAPABLE
 
 class DTypePolicy():
 

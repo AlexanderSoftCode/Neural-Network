@@ -2,7 +2,7 @@ from string import Template
 import aether.config as config
 
 # thread_idx = local coordinate inside the block
-# blockDim = size/capacity inside a single block (512 or 1024)
+# blockDim = size/capacity inside a single block (512 or 1024) runtime 
 # blockIdx = global block coordinate inside the grid
 _POOL_FORWARD_TEMPLATE = Template(r'''
 $hip_include
@@ -313,10 +313,6 @@ def _get_compiled_avg_backward_kernel(variant: str):
     )
     _pool_kernel_cache[cache_key] = kernel
     return kernel
-
-def _is_gpu_pooling_available() -> bool:
-    """Internal check for CuPy hardware support across all pooling layers."""
-    return config.HAS_CUPY
 
 # Helper Functions for MaxPool2D
 def get_max_pool2d_forward_kernel(variant: str, training: bool = True):
