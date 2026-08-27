@@ -196,11 +196,9 @@ class Conv2d(Layer):
         if not self._fp16_weight_valid:
             self._refresh_fp16_weights(xp)
 
-        # Both backward epilogues accumulate atomically, so the destinations
-        # must start at zero.
         self.dbiases = xp.zeros((self.C_out,), dtype=xp.float32)
         self.dweights = xp.zeros((fH, fW, C_in, self.C_out), dtype=xp.float32)
-        self.dinputs = xp.zeros_like(self.inputs, dtype=xp.float32)
+        self.dinputs = xp.empty_like(self.inputs, dtype=xp.float32)
 
         dw_plan(inputs_fp16, dvalues_fp16, self.dweights, self.dbiases)
         dx_plan(dvalues_fp16, self._fp16_weight_cache, self.dinputs)
@@ -302,18 +300,25 @@ class Conv2d(Layer):
         pad_h = (fH - 1) // 2 if self.padding == "same" else 0
         pad_w = (fW - 1) // 2 if self.padding == "same" else 0
 
-        if self.padding == "same": 
-            backward_pad_h = (fH - 1) - pad_h
-            backward_pad_w = (fW - 1) - pad_w
-        if self.padding == "valid": 
-            backward_pad_h = (fH - 1)
-            backward_pad_w = (fW - 1)
-        
+        pad_top  = (fH - 1) - pad_h
+        pad_left = (fW - 1) - pad_w
+        pad_bottom = H_in + fH - 1 - pad_top - dilated_H
+        pad_right  = W_in + fW - 1 - pad_left - dilated_W
+
         dvalues_padded = xp.pad(dvalues_dilated, pad_width= (
-            (0, 0), (backward_pad_h, backward_pad_h), (backward_pad_w, backward_pad_w), (0, 0))
+            (0, 0), (pad_top, pad_bottom), (pad_left, pad_right), (0, 0))
             )
 
-        # flip the values in the fH and fW dimensions, leave C_in and C_out dimensions alone
+        windows_h = dvalues_padded.shape[1] - fH + 1
+        windows_w = dvalues_padded.shape[2] - fW + 1
+        if windows_h != H_in or windows_w != W_in:
+            raise RuntimeError(
+                f"[aether] Conv2d backward: dilated dY padding yields "
+                f"{windows_h}x{windows_w} windows for a {H_in}x{W_in} input "
+                f"(filter={fH}x{fW}, stride={sH}x{sW}, padding='{self.padding}'). "
+                f"Refusing to build an out-of-bounds strided view."
+            )
+
         flipped_weights = self.filter_weights[::-1, ::-1, :, :]
         dvalues_patches = as_strided(dvalues_padded, 
                             shape = (S, H_in, W_in, fH, fW, C_out),
