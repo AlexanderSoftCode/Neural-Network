@@ -19,6 +19,7 @@ _MIN_REDRAW_INTERVAL = 1.0 / 30.0
 
 
 class Fore:
+    CYAN = "\033[96m"
     GREEN = "\033[92m"
     RED = "\033[91m"
     YELLOW = "\033[93m"
@@ -169,6 +170,13 @@ class TrainingProgress:
         self._best_val_acc: float = float("-inf")
         self._prev_val: dict[str, float | None] = {"loss": None, "acc": None}
 
+        # Run summary state. The clock starts at construction -- `make_progress`
+        # is called immediately before the epoch loop, so this spans the run.
+        self._run_start_time: float = time.perf_counter()
+        self._best_val_acc_pct: float | None = None
+        self._final_train_loss: float | None = None
+        self._closed: bool = False
+
         # Epoch-level state
         self._current_epoch: int = 1
         self._prev_train: dict[str, float | None] = {}
@@ -271,6 +279,8 @@ class TrainingProgress:
         epoch summary -- replacing the live telemetry line under ``tty``,
         landing beneath the combined live line under ``jupyter``.
         """
+        self._final_train_loss = epoch_loss
+
         dim, bright, reset = self._dim, self._bright, self._reset
         summary = (
             f"{bright}[Epoch {epoch}/{self.epochs} Total]{reset} "
@@ -317,6 +327,7 @@ class TrainingProgress:
 
         if val_acc > self._best_val_acc:
             self._best_val_acc = val_acc
+            self._best_val_acc_pct = val_acc_pct
             badge = (
                 f"   {Fore.YELLOW}★ new best acc{Style.RESET_ALL}"
                 if self.use_color
@@ -337,11 +348,45 @@ class TrainingProgress:
         self._flush()
 
     def close(self) -> None:
-        """Freezes any dangling live block and resets terminal color state."""
+        """Freezes any dangling live block, emits the run summary, and resets
+        terminal color state."""
         self._freeze_live_block()
+
+        if not self._closed:
+            self._closed = True
+            summary = self._format_summary()
+            if summary:
+                self._write(f"\n{summary}\n")
+
         if self.use_color:
             self._write(Style.RESET_ALL)
         self._flush()
+
+    def _format_summary(self) -> str | None:
+        """
+        One-shot run-level closing line. Returns ``None`` when no epoch ever
+        committed -- a bare ``[Summary]`` with nothing to report is noise.
+        """
+        if self._final_train_loss is None:
+            return None
+
+        dim, reset = self._dim, self._reset
+        cyan = Fore.CYAN if self.use_color else ""
+        green = Fore.GREEN if self.use_color else ""
+        yellow = Fore.YELLOW if self.use_color else ""
+
+        elapsed = _fmt_duration(time.perf_counter() - self._run_start_time)
+        parts = [f"{dim}Total Time:{reset} {elapsed}"]
+
+        if self._best_val_acc_pct is not None:
+            parts.append(
+                f"{dim}Best Val Acc:{reset} "
+                f"{green}{self._best_val_acc_pct:.2f}%{reset} {yellow}★{reset}"
+            )
+
+        parts.append(f"{dim}Final Loss:{reset} {self._final_train_loss:.4f}")
+
+        return f"{cyan}[Summary]{reset} " + " - ".join(parts)
 
     # ---- Bar formatting ------------------------------------------
 

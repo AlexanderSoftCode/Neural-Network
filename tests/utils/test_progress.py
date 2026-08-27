@@ -114,6 +114,112 @@ class TestOtherRenderModes(unittest.TestCase):
         self.assertIn("Epoch 1/2", stream)
 
 
+class TestRunSummary(unittest.TestCase):
+    """The closing `[Summary]` line is run-level: emitted once, only when
+    there is something to report, and colorless off-terminal."""
+
+    def _summaries(self, stream):
+        return [ln for ln in stream.split("\n") if "[Summary]" in ln]
+
+    def test_emitted_exactly_once_in_every_render_mode(self):
+        for mode in ("tty", "jupyter", "plain"):
+            with self.subTest(mode=mode):
+                stream = _drive(TrainingProgress(40, 2, has_reg=True, render_for=mode))
+                lines = self._summaries(stream)
+                self.assertEqual(len(lines), 1, f"{mode}: {len(lines)} summary lines")
+
+                visible = _ANSI.sub("", lines[0])
+                self.assertIn("Total Time:", visible)
+                self.assertIn("Best Val Acc:", visible)
+                self.assertIn("Final Loss:", visible)
+
+    def test_lands_on_its_own_line_after_a_blank_separator(self):
+        # Both live modes leave the cursor on a fresh line, so the summary is
+        # a standalone block -- never appended to a frozen frame.
+        for mode in ("tty", "jupyter"):
+            with self.subTest(mode=mode):
+                stream = _drive(TrainingProgress(40, 2, has_reg=True, render_for=mode))
+                lines = stream.split("\n")
+                idx = next(i for i, ln in enumerate(lines) if "[Summary]" in ln)
+
+                self.assertEqual(lines[idx - 1], "", f"{mode}: no blank separator")
+                self.assertNotIn("\r", lines[idx])
+                self.assertTrue(lines[idx].startswith("\033[96m[Summary]"))
+
+    def test_reports_final_epoch_loss_and_best_val_acc(self):
+        progress = TrainingProgress(4, 3, render_for="plain")
+        sink = io.StringIO()
+        progress._write = sink.write
+        progress._flush = lambda: None
+
+        for epoch, (loss, val_acc) in enumerate(
+            ((1.9, 0.41), (1.55, 0.5296), (1.3477, 0.5012)), start=1
+        ):
+            progress.start_epoch(epoch)
+            progress.commit_epoch(epoch, loss, 0.5, 1e-3)
+            progress.commit_validation(0.9, val_acc)
+        progress.close()
+
+        line = self._summaries(sink.getvalue())[0]
+        self.assertIn("Final Loss: 1.3477", line)
+        # Best, not last: epoch 2 outscores the epoch 3 validation.
+        self.assertIn("Best Val Acc: 52.96%", line)
+
+    def test_accepts_already_scaled_validation_accuracy(self):
+        # `commit_validation` normalizes 0-1 inputs to percent; values above 1
+        # are already percentages and must not be scaled a second time.
+        progress = TrainingProgress(4, 1, render_for="plain")
+        sink = io.StringIO()
+        progress._write = sink.write
+        progress._flush = lambda: None
+
+        progress.start_epoch(1)
+        progress.commit_epoch(1, 1.0, 0.5, 1e-3)
+        progress.commit_validation(0.9, 52.96)
+        progress.close()
+
+        self.assertIn("Best Val Acc: 52.96%", self._summaries(sink.getvalue())[0])
+
+    def test_omits_val_acc_segment_without_validation(self):
+        progress = TrainingProgress(4, 1, render_for="plain")
+        sink = io.StringIO()
+        progress._write = sink.write
+        progress._flush = lambda: None
+
+        progress.start_epoch(1)
+        progress.commit_epoch(1, 1.0, 0.5, 1e-3)
+        progress.close()
+
+        line = self._summaries(sink.getvalue())[0]
+        self.assertNotIn("Best Val Acc", line)
+        self.assertIn("Total Time:", line)
+        self.assertIn("Final Loss: 1.0000", line)
+
+    def test_silent_when_no_epoch_committed(self):
+        for mode in ("tty", "jupyter", "plain"):
+            with self.subTest(mode=mode):
+                progress = TrainingProgress(4, 1, render_for=mode)
+                sink = io.StringIO()
+                progress._write = sink.write
+                progress._flush = lambda: None
+
+                progress.close()
+                self.assertEqual(self._summaries(sink.getvalue()), [])
+
+    def test_repeated_close_does_not_duplicate(self):
+        progress = TrainingProgress(4, 1, render_for="plain")
+        sink = io.StringIO()
+        progress._write = sink.write
+        progress._flush = lambda: None
+
+        progress.start_epoch(1)
+        progress.commit_epoch(1, 1.0, 0.5, 1e-3)
+        progress.close()
+        progress.close()
+
+        self.assertEqual(len(self._summaries(sink.getvalue())), 1)
+
+
 class TestVisibleLen(unittest.TestCase):
     def test_discounts_sgr_runs(self):
         self.assertEqual(_visible_len("\033[92m▲1.25%\033[0m"), 6)
