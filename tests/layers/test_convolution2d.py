@@ -1,3 +1,5 @@
+import numpy as np
+
 import aether.config as config
 import tests.base_case as base_case
 
@@ -26,6 +28,12 @@ class TestConvLayer(base_case.AetherBaseLayerTestCase):
             stride=self.STRIDE,
             padding=self.PADDING
         )
+        # Seed the global stream too, not just the layer init. Test data is
+        # drawn from it, so without this each test sees whatever stream
+        # position the preceding tests left -- which makes a failure reproduce
+        # under `unittest discover` but not when the file is run alone.
+        self.xp.random.seed(self.SEED)
+
         #Dummy image, batch of 2, 28x28 pixels, 1 channel
         self.test_images = self.xp.random.randn(*self.CONV_SHAPE)
 
@@ -376,6 +384,10 @@ class TestConvLayer(base_case.AetherBaseLayerTestCase):
 
     GEMM_REL_TOL = 5e-3
 
+    def _to_numpy(self, arr):
+        """Host copy, whichever backend the array came from."""
+        return arr.get() if hasattr(arr, "get") else np.asarray(arr)
+
     def _assert_gemm_close(self, actual, desired, name, tol=None):
         """Norm-relative comparison: max|actual - desired| / max|desired|."""
         tol = self.GEMM_REL_TOL if tol is None else tol
@@ -467,39 +479,255 @@ class TestConvLayer(base_case.AetherBaseLayerTestCase):
             stride=(2, 2), padding="valid",
         )
 
-    def test_conv_gpu_backward_dinput_parity(self):
-        """Verify numerical equivalence for dinputs between _backward_gpu and _backward_fallback"""
+    # ---- dinput kernel regression tests ---------------------------
+
+    def _run_dinput_kernel_parity(self, S, spatial, in_channels, out_channels,
+                                  stride=None, padding=None, filter_size=None):
+        """Drive the gather dinput kernel and check it against the fallback."""
         if self.backend_name != 'cupy':
             self.skipTest("CuPy backend required for GPU kernel tests")
         from aether.custom_kernels import conv_kernel
         if not conv_kernel.get_is_conv_gpu_available():
             self.skipTest("Matrix-core GPU kernels not available on this device")
 
+        stride = stride or self.STRIDE
+        padding = padding or self.PADDING
+        filter_size = filter_size or self.FILTER_SIZE
+        H, W = spatial
+
         layer = self.make_built_layer(
             Conv2d,
-            input_shape = (8, 8, self.IN_CHANNELS),
-            in_channels=self.IN_CHANNELS,
-            out_channels=2,
-            filter_size=self.FILTER_SIZE,
-            stride=self.STRIDE,
-            padding=self.PADDING
+            input_shape=(H, W, in_channels),
+            in_channels=in_channels,
+            out_channels=out_channels,
+            filter_size=filter_size,
+            stride=stride,
+            padding=padding,
+            seed=self.SEED
         )
 
-        fixed_input = self.xp.random.randn(2, 8, 8, self.IN_CHANNELS).astype(self.xp.float32)
-        dvalues = self.xp.random.randn(2, 8, 8, 2).astype(self.xp.float32)
+        fixed_input = self.xp.random.randn(S, H, W, in_channels).astype(self.xp.float32)
+        meta = layer._get_shape_meta((H, W, in_channels))
+        dvalues = self.xp.random.randn(
+            S, meta.H_out, meta.W_out, out_channels
+        ).astype(self.xp.float32)
 
-        # 1. Run Fallback End-to-End
         layer._forward_fallback(fixed_input, training=False)
         layer._backward_fallback(dvalues)
         fallback_dinputs = layer.dinputs.copy()
 
-        # 2. Run GPU End-to-End
         layer._forward_gpu(fixed_input, training=False)
         layer._backward_gpu(dvalues)
         gpu_dinputs = layer.dinputs.copy()
 
-        # WMMA FP16 + atomicAdd vs FP32 tensordot tolerance comparison
-        self.xp.testing.assert_allclose(gpu_dinputs, fallback_dinputs, rtol=1e-2, atol=1e-2)
+        self.assertEqual(gpu_dinputs.shape, fallback_dinputs.shape)
+        self._assert_gemm_close(gpu_dinputs, fallback_dinputs, "dinputs")
+
+    def test_conv_gpu_backward_dinput_parity(self):
+        """Baseline: 3x3 'same', stride 1 -- the shape the CIFAR model runs."""
+        self._run_dinput_kernel_parity(
+            S=2, spatial=(8, 8), in_channels=self.IN_CHANNELS, out_channels=2
+        )
+
+    def test_conv_gpu_backward_dinput_parity_multitile(self):
+        """A shape whose M and C_IN both span several 64x64 block tiles.
+
+        The 8x8 case above fits inside one output tile, so it never exercises
+        the grid.x/grid.y tiling or the ragged tail masking in the epilogue.
+        """
+        self._run_dinput_kernel_parity(
+            S=4, spatial=(16, 16), in_channels=8, out_channels=48
+        )
+
+    def test_conv_gpu_backward_dinput_parity_valid_strided(self):
+        """stride 2 + valid padding: 4 residue classes, base_qh == 0."""
+        self._run_dinput_kernel_parity(
+            S=2, spatial=(16, 16), in_channels=4, out_channels=8,
+            stride=(2, 2), padding="valid",
+        )
+
+    def test_conv_gpu_backward_dinput_parity_same_strided(self):
+        """stride 2 + same padding: residue classes with a non-zero base_qh."""
+        self._run_dinput_kernel_parity(
+            S=2, spatial=(16, 16), in_channels=4, out_channels=8,
+            stride=(2, 2), padding="same",
+        )
+
+    def test_conv_gpu_backward_dinput_parity_asymmetric(self):
+        """Non-square filter with a mixed stride: sH != sW and fH != fW."""
+        self._run_dinput_kernel_parity(
+            S=2, spatial=(15, 12), in_channels=3, out_channels=6,
+            filter_size=(5, 3), stride=(2, 1), padding="valid",
+        )
+
+    def test_conv_gpu_backward_dinput_matches_routed_fallback(self):
+        """Assert both gpu and fallback paths agree on dinput tensor value"""
+        if self.backend_name != "cupy":
+            self.skipTest(
+                "CuPy backend required: this test contrasts the matrix-core "
+                "path against the fallback, so it needs both available"
+            )
+        from aether.custom_kernels import conv_kernel
+        if not conv_kernel.get_is_conv_gpu_available():
+            self.skipTest("Matrix-core GPU kernels not available on this device")
+
+        S, H, W, C_in, C_out = 2, 16, 16, 8, 16
+        layer_kwargs = dict(
+            input_shape=(H, W, C_in),
+            seed=1234,
+            in_channels=C_in,
+            out_channels=C_out,
+            filter_size=(3, 3),
+            stride=(2, 2),
+            padding="same",
+        )
+
+        gpu_layer = self.make_built_layer(Conv2d, **layer_kwargs)
+        throwaway_layer = self.make_built_layer(Conv2d, **layer_kwargs)
+
+        gpu_layer._compile_for_device("cupy")
+        throwaway_layer._compile_for_device("numpy")
+
+        self.assertIs(gpu_layer.forward.__func__, Conv2d._forward_gpu)
+        self.assertIs(gpu_layer.backward.__func__, Conv2d._backward_gpu)
+        self.assertIs(throwaway_layer.forward.__func__, Conv2d._forward_fallback)
+        self.assertIs(throwaway_layer.backward.__func__, Conv2d._backward_fallback)
+
+        throwaway_layer.set_parameters(
+            weights=gpu_layer.filter_weights.copy(),
+            biases=gpu_layer.biases.copy(),
+        )
+
+        inputs = self.xp.random.randn(S, H, W, C_in).astype(self.xp.float32)
+        meta = gpu_layer._get_shape_meta((H, W, C_in))
+        dvalues = self.xp.random.randn(
+            S, meta.H_out, meta.W_out, C_out
+        ).astype(self.xp.float32)
+
+        gpu_layer.forward(inputs, training=False)
+        gpu_dinputs = gpu_layer.backward(dvalues)
+
+        throwaway_layer.forward(inputs, training=False)
+        fallback_dinputs = throwaway_layer.backward(dvalues)
+
+        self.assertEqual(gpu_dinputs.shape, (S, H, W, C_in))
+        self.assertEqual(gpu_dinputs.shape, fallback_dinputs.shape)
+        self._assert_gemm_close(
+            gpu_dinputs, fallback_dinputs, "dinputs (routed gpu vs routed fallback)"
+        )
+
+
+    @staticmethod
+    def _brute_force_dinputs(x, weights, dvalues, stride, pad):
+        """Reference dinputs from the definition of the convolution.
+
+        Deliberately a naive scatter loop in fp32 NumPy: no strided views, no
+        dilation trick, no im2col. Both production paths derive their geometry
+        from the same reasoning, so neither can serve as an independent check
+        on the other -- a shared misunderstanding of the output extents shows
+        up as agreement, not as a failure. This owes them nothing.
+        """
+        S, H, W, _ = x.shape
+        fH, fW, C_in, C_out = weights.shape
+        sH, sW = stride
+        pad_h, pad_w = pad
+        _, H_out, W_out, _ = dvalues.shape
+
+        dx = np.zeros((S, H, W, C_in), dtype=np.float32)
+        for s in range(S):
+            for h_out in range(H_out):
+                for w_out in range(W_out):
+                    for fh in range(fH):
+                        h_in = h_out * sH - pad_h + fh
+                        if not (0 <= h_in < H):
+                            continue
+                        for fw in range(fW):
+                            w_in = w_out * sW - pad_w + fw
+                            if not (0 <= w_in < W):
+                                continue
+                            dx[s, h_in, w_in, :] += (
+                                weights[fh, fw, :, :] @ dvalues[s, h_out, w_out, :]
+                            )
+        return dx
+
+    def _run_dinput_ground_truth(self, S, spatial, in_channels, out_channels,
+                                 stride, padding, filter_size=(3, 3)):
+        """Check BOTH paths against the brute-force reference.
+
+        The parity tests above pin the GPU kernel to the fallback, which is
+        only as good as the fallback. A stride > 1 bug in the fallback's
+        dilated-dY padding once read past its own buffer here and went
+        unnoticed for exactly that reason: it returned zeros on a fresh
+        allocator, which is the right answer for the rows it mis-covered, so
+        the suite passed in isolation and failed only under discovery.
+        """
+        H, W = spatial
+        layer = self.make_built_layer(
+            Conv2d,
+            input_shape=(H, W, in_channels),
+            seed=self.SEED,
+            in_channels=in_channels,
+            out_channels=out_channels,
+            filter_size=filter_size,
+            stride=stride,
+            padding=padding,
+        )
+        meta = layer._get_shape_meta((H, W, in_channels))
+
+        inputs = self.xp.random.randn(S, H, W, in_channels).astype(self.xp.float32)
+        dvalues = self.xp.random.randn(
+            S, meta.H_out, meta.W_out, out_channels
+        ).astype(self.xp.float32)
+
+        truth = self._brute_force_dinputs(
+            self._to_numpy(inputs), self._to_numpy(layer.filter_weights),
+            self._to_numpy(dvalues), stride, (meta.pad_h, meta.pad_w),
+        )
+        truth = self.xp.asarray(truth)
+
+        layer._forward_fallback(inputs, training=False)
+        layer._backward_fallback(dvalues)
+        self._assert_gemm_close(layer.dinputs, truth, "dinputs (fallback vs truth)",
+                                tol=1e-5)
+
+        from aether.custom_kernels import conv_kernel
+        if self.backend_name == 'cupy' and conv_kernel.get_is_conv_gpu_available():
+            layer._forward_gpu(inputs, training=False)
+            layer._backward_gpu(dvalues)
+            self._assert_gemm_close(layer.dinputs, truth, "dinputs (gpu vs truth)")
+
+    def test_conv_dinput_ground_truth_stride1(self):
+        """Stride 1: the only case where the fallback's symmetric pad was right."""
+        self._run_dinput_ground_truth(
+            S=2, spatial=(16, 16), in_channels=4, out_channels=8,
+            stride=(1, 1), padding="same",
+        )
+
+    def test_conv_dinput_ground_truth_strided_same(self):
+        """Stride 2 'same': dilated_H falls 1 short of the H_in windows needed."""
+        self._run_dinput_ground_truth(
+            S=2, spatial=(16, 16), in_channels=4, out_channels=8,
+            stride=(2, 2), padding="same",
+        )
+
+    def test_conv_dinput_ground_truth_strided_valid(self):
+        """Stride 2 'valid': same shortfall, reached by a different pad rule."""
+        self._run_dinput_ground_truth(
+            S=2, spatial=(16, 16), in_channels=4, out_channels=8,
+            stride=(2, 2), padding="valid",
+        )
+
+    def test_conv_dinput_ground_truth_mixed_stride(self):
+        """sH != sW: height comes up short while width lands exactly in bounds.
+
+        This asymmetry is what made the original bug look intermittent -- a
+        shape whose width happens to fit reads in bounds on one axis and out
+        of bounds on the other.
+        """
+        self._run_dinput_ground_truth(
+            S=2, spatial=(16, 16), in_channels=4, out_channels=8,
+            stride=(2, 1), padding="valid",
+        )
 
 
 base_case.register_test_suites(globals(), TestConvLayer)
