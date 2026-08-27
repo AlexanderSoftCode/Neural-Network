@@ -85,8 +85,9 @@ class Dropout(Layer):
             return self.output
         
         xp = config.get_array_module(inputs)
-        self.binary_mask = xp.random.binomial(1, self.keep_rate, size=inputs.shape) \
-                            / self.keep_rate
+        self.binary_mask = (
+            xp.random.binomial(1, self.keep_rate, size=inputs.shape) / self.keep_rate
+        ).astype(inputs.dtype, copy=False)
         self.output = inputs * self.binary_mask
         return self.output
 
@@ -157,8 +158,9 @@ class SpatialDropout(Layer):
             return self.output
         
         C = self.inputs.shape[-1]
-        self.channel_mask = xp.random.binomial(1, self.keep_rate, size = (1, 1, 1, C)) \
-                            / self.keep_rate
+        self.channel_mask = (
+            xp.random.binomial(1, self.keep_rate, size=(1, 1, 1, C)) / self.keep_rate
+        ).astype(inputs.dtype, copy=False)
         self.output = inputs * self.channel_mask
 
         return self.output

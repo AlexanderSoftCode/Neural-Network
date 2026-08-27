@@ -222,7 +222,8 @@ class Pooling:
     def backward(self, dvalues):
 
         S, H_out, W_out, C = dvalues.shape
-        fH, fW, sH, sW = self.filter_size, self.strides
+        fH, fW = self.filter_size
+        sH, sW = self.strides
         _, H_in, W_in, _ = self.inputs.shape
 
         if self.padding == "valid":
@@ -335,7 +336,8 @@ class Pooling:
                 scale_factor = cp.array(1.0 / (fH * fW), dtype = dvalues.dtype)
                 dinputs = dvalues_patches.sum(axis = (3,4) * scale_factor)
 
-        return dinputs
+        self.dinputs = dinputs
+        return self.dinputs
 
 class Dense:
     def __init__(self, n_inputs, n_neurons, weight_regularizer_l1 = 0,
