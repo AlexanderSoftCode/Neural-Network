@@ -3,9 +3,10 @@ from aether._utils.null_objects import (
     NullAccuracy as NullAccuracy,
     NullOptimizer as NullOptimizer,
 )
-
+from aether._utils.progress import TrainingProgress as TrainingProgress
 __all__ = [
     "install_lazy_attrs",
     "NullAccuracy",
     "NullOptimizer",
+    "TrainingProgress",
 ]

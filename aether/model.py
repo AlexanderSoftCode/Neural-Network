@@ -10,7 +10,7 @@ from aether.losses import Loss
 from aether.metrics import Accuracy
 from aether.optimizers import Optimizer
 from aether._utils import NullAccuracy, NullOptimizer
-
+from aether._utils.progress import make_progress
 try:
     import safetensors.numpy
 except ImportError:
@@ -273,7 +273,7 @@ class Model():
         batch_size=None,
         shuffle=True,
         print_every=1,
-        verbose = True,
+        verbose = 1,
         validation_data=None
     ):
         """
@@ -295,7 +295,11 @@ class Model():
                 slices in dataset order every epoch. Never applied to
                 `validation_data` -- evaluation order doesn't affect the metric.
             print_every (int): Step interval frequency for logging telemetry.
-            verbose (bool, optional): If True, prints training loss and accuracy metrics to stdout. Defaults to True. 
+            verbose (int, optional): Verbosity mode for training telemetry.
+                - `0`: Silent mode (no output printed).
+                - `1`: Dynamic graphical progress bar with metrics (default).
+                - `2`: Plain text summary per epoch without carriage returns/ANSI escapes.
+            Defaults to 1. 
             validation_data (tuple, optional): (X_val, y_val) tuple for out-of-sample testing.
         """
         if not self.is_finalized:
@@ -309,7 +313,7 @@ class Model():
                 "Pass in a valid loss function to model.configure(loss=...) before finalize & train"
             )
         self._assert_device_alignment(X, y)
-        if validation_data is not None: 
+        if validation_data is not None:
             self._assert_device_alignment(validation_data[0], validation_data[1])
 
         xp = config.get_array_module(X)
@@ -335,6 +339,7 @@ class Model():
         backward_fn = self.backward
         loss = self.loss
         accuracy = self.accuracy
+        optimizer_obj = self.optimizer
         step_optimizer = self._step_optimizer
 
         has_reg = hasattr(loss, "regularization_loss") and any(
@@ -366,15 +371,15 @@ class Model():
                 step_optimizer()
                 return data_l, 0.0, acc_l
 
-        opt = self.optimizer
-        get_lr = lambda: getattr(opt, "current_learning_rate", getattr(opt, "lr", None))
+        get_lr = lambda: getattr(optimizer_obj, "current_learning_rate", getattr(optimizer_obj, "lr", None))
+
+        progress = make_progress(verbose, train_steps, epochs, has_reg)
 
         for epoch in range(1, epochs + 1):
             loss.new_pass()
             accuracy.new_pass()
+            progress.start_epoch(epoch)
 
-            # Fresh permutation per epoch -- a single small 1D index array on
-            # the active device, never a copy/reorder of the full X/y tensors.
             epoch_indices = xp.random.permutation(num_samples) if shuffle else None
 
             for step, (start_idx, end_idx) in enumerate(batch_slices):
@@ -382,20 +387,22 @@ class Model():
 
                 data_loss, reg_loss, acc_val = run_step(batch_X, batch_y)
 
-                # Telemetry: GPU-to-Host sync barrier strictly confined to log steps
-                if verbose and print_every and (step % print_every == 0 or step == train_steps - 1):
+                # Bar-only tick: pure host-side math, zero GPU sync.
+                progress.tick(step + 1)
+
+                # Telemetry: GPU-to-Host sync barrier strictly confined to log steps.
+                if print_every and (step % print_every == 0 or step == train_steps - 1):
                     s_data_loss = float(data_loss)
                     s_reg_loss = float(reg_loss)
-                    s_loss = s_data_loss + s_reg_loss
                     s_acc = float(acc_val)
-
                     lr = get_lr()
-                    lr_str = f" - lr: {float(lr):.6f}" if lr is not None else ""
 
-                    print(
-                        f"Epoch {epoch}/{epochs} | Step {step + 1}/{train_steps} "
-                        f"- loss: {s_loss:.4f} (data: {s_data_loss:.4f}, reg: {s_reg_loss:.4f}) "
-                        f"- acc: {s_acc:.4f}{lr_str}"
+                    progress.update_metrics(
+                        step + 1,
+                        s_data_loss + s_reg_loss,
+                        s_acc,
+                        float(lr) if lr is not None else 0.0,
+                        reg_loss=s_reg_loss if has_reg else None,
                     )
 
             accum = loss.calculate_accumulated(include_regularization=has_reg)
@@ -403,18 +410,16 @@ class Model():
             epoch_acc = float(accuracy.calculate_accumulated())
 
             lr = get_lr()
-            lr_summary = f" - lr: {float(lr):.6f}" if lr is not None else ""
-            if verbose and print_every:
-                print(
-                    f"[Epoch {epoch}/{epochs} Total] "
-                    f"loss: {epoch_loss:.4f} - acc: {epoch_acc:.4f}{lr_summary}"
-                )
+            progress.commit_epoch(epoch, epoch_loss, epoch_acc, float(lr) if lr is not None else 0.0)
 
             if validation_data is not None:
                 X_val, y_val = validation_data
-                self.evaluate(X_val, y_val, batch_size=batch_size, verbose=verbose)
-                
-    def evaluate(self, X_val, y_val, *, batch_size=None, verbose=True):
+                val_loss, val_acc = self.evaluate(X_val, y_val, batch_size=batch_size, verbose=0)
+                progress.commit_validation(val_loss, val_acc)
+
+        progress.close()
+
+    def evaluate(self, X_val, y_val, *, batch_size=None, verbose=1):
         """
         Evaluate the model's loss and metrics on validation/test data in inference mode.
 
@@ -422,7 +427,10 @@ class Model():
             X_val (ndarray): Evaluation input features (NumPy or CuPy ndarray).
             y_val (ndarray): Ground truth labels or targets.
             batch_size (int, optional): Mini-batch size. Defaults to None (full-batch).
-            verbose (bool, optional): If True, prints evaluation loss and accuracy metrics to stdout. Defaults to True.   
+            verbose (int | bool, optional): Verbosity mode for evaluation.
+                - `0` / `False`: Silent mode (no output printed).
+                - `1` / `True`: Prints the final evaluation loss and accuracy metrics.
+                Defaults to 1.
         Returns:
             tuple: (val_loss, val_acc) representing the computed validation metrics.
         Raises:

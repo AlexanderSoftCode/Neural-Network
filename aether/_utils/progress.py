@@ -1,0 +1,564 @@
+"""
+ANSI-based live training display supporting dual-line redraws, rolling
+telemetry deltas, and scroll-to-history epoch/validation summaries.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import sys
+import time
+from typing import Callable, Literal
+from aether._utils.null_objects import _NullProgress
+RenderMode = Literal["tty", "jupyter", "plain"]
+
+# ~30 Hz. Above this, redraws are imperceptible and cost one write+flush
+# syscall per step, coupling host overhead to model throughput.
+_MIN_REDRAW_INTERVAL = 1.0 / 30.0
+
+
+class Fore:
+    GREEN = "\033[92m"
+    RED = "\033[91m"
+    YELLOW = "\033[93m"
+    WHITE = "\033[97m"
+    RESET = "\033[39m"
+
+
+class Style:
+    DIM = "\033[2m"
+    BRIGHT = "\033[1m"
+    RESET_ALL = "\033[0m"
+
+
+_GOODNESS = {
+    "loss": -1,
+    "acc": 1,
+}
+
+# Precompute 31-step lookup tables at import time to eliminate per-tick string allocations
+_BAR_LOOKUP_COLOR = tuple(
+    f"{Fore.YELLOW}{'█' * i}{Style.DIM}{'░' * (30 - i)}{Style.RESET_ALL}"
+    for i in range(30)
+) + (f"{Fore.GREEN}{'█' * 30}{Style.RESET_ALL}",)
+
+_BAR_LOOKUP_PLAIN = tuple("█" * i + "░" * (30 - i) for i in range(31))
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def _visible_len(text: str) -> int:
+    """Printed column count of ``text``, ignoring embedded ANSI escapes."""
+    return len(_ANSI_RE.sub("", text))
+
+
+def _detect_render_mode(force_mode: str | None = None) -> RenderMode:
+    """Detects whether standard cursor movement, CR overwrite, or plain text should be used."""
+    if force_mode in ("tty", "jupyter", "plain"):
+        return force_mode  # type: ignore[return-value]
+    if "JPY_PARENT_PID" in os.environ or type(sys.stdout).__name__ == "OutStream":
+        return "jupyter"
+    if hasattr(sys.stdout, "isatty") and sys.stdout.isatty():
+        return "tty"
+    return "plain"
+
+
+def _fmt_duration(seconds: float) -> str:
+    """MM:SS past a minute, fractional seconds below it."""
+    if seconds >= 60.0:
+        total = int(seconds)
+        return f"{total // 60:02d}:{total % 60:02d}"
+    return f"{seconds:.1f}s"
+
+
+def _delta_str(
+    metric_name: str,
+    current: float,
+    previous: float | None,
+    is_pct: bool = False,
+    use_color: bool = True,
+) -> str:
+    """
+    Renders delta glyphs (▲/▼) colored according to metric goodness:
+    (goodness * direction > 0 -> Green, < 0 -> Red). Never fabricates 0.000.
+    """
+    if previous is None:
+        return " " * 8
+
+    diff = current - previous
+    if abs(diff) < 1e-7:
+        return " " * 8
+
+    direction_sign = 1 if diff > 0 else -1
+    goodness_sign = _GOODNESS.get(metric_name, 1) * direction_sign
+    glyph = "▲" if diff > 0 else "▼"
+    val_diff = abs(diff)
+
+    if is_pct:
+        diff_val = val_diff * 100.0 if val_diff <= 1.0 else val_diff
+        content = f" {glyph}{diff_val:>5.2f}%"
+    else:
+        content = f" {glyph}{val_diff:>6.4f}"
+
+    if not use_color:
+        return content
+
+    color = Fore.GREEN if goodness_sign > 0 else Fore.RED
+    return f"{color}{content}{Style.RESET_ALL}"
+
+
+class TrainingProgress:
+    """
+    Host-side progress coordinator for training loops.
+
+    Parameters
+    ----------
+    total_steps : int
+        Total training batches/steps in a single epoch.
+    epochs : int
+        Total number of training epochs.
+    has_reg : bool, default=False
+        Whether the model utilizes regularization loss. Derived once AOT.
+    render_for : str, optional
+        Force a specific render mode ('tty', 'jupyter', or 'plain').
+    """
+
+    def __init__(
+        self,
+        total_steps: int,
+        epochs: int,
+        has_reg: bool = False,
+        render_for: str | None = None,
+    ) -> None:
+        self.total_steps = max(total_steps, 1)
+        self.epochs = epochs
+        self.has_reg = has_reg
+        self.render_mode: RenderMode = _detect_render_mode(render_for)
+        self.use_color: bool = self.render_mode in ("tty", "jupyter")
+        self._is_live: bool = self.render_mode != "plain"
+
+        # Static math factors to avoid runtime division in tick
+        self._step_factor: float = 30.0 / self.total_steps
+        self._percent_factor: float = 100.0 / self.total_steps
+        self._step_width: int = len(str(self.total_steps))
+        self._bar_lookup = _BAR_LOOKUP_COLOR if self.use_color else _BAR_LOOKUP_PLAIN
+
+        # SGR fragments resolved once; never re-derived per redraw.
+        self._dim: str = Style.DIM if self.use_color else ""
+        self._bright: str = Style.BRIGHT if self.use_color else ""
+        self._reset: str = Style.RESET_ALL if self.use_color else ""
+
+        # Bound stream primitives -- avoids repeated attribute lookup on the
+        # hot redraw path.
+        self._write: Callable[[str], int] = sys.stdout.write
+        self._flush: Callable[[], None] = sys.stdout.flush
+
+        # AOT pointer-swap dispatch: render mode and reg-presence are run-level
+        # constants, so bind the concrete implementation once.
+        self._render: Callable[[], None] = {
+            "tty": self._render_tty,
+            "jupyter": self._render_jupyter,
+        }.get(self.render_mode, self._render_noop)
+
+        self._format_telemetry: Callable[..., str] = (
+            self._format_telemetry_reg if has_reg else self._format_telemetry_plain
+        )
+
+        # Run-level persistent state
+        self._best_val_acc: float = float("-inf")
+        self._prev_val: dict[str, float | None] = {"loss": None, "acc": None}
+
+        # Epoch-level state
+        self._current_epoch: int = 1
+        self._prev_train: dict[str, float | None] = {}
+        self._epoch_start_time: float = 0.0
+
+        # Redraw buffer state
+        self._last_bar_line: str = ""
+        self._last_telemetry_line: str = ""
+        self._lines_on_screen: int = 0
+        self._last_render_time: float = 0.0
+
+        # Width of the jupyter frame currently on screen -- the only frame a
+        # new one has to cover. Tracked in both units; see `_pad_jupyter`.
+        self._live_jupyter_raw: int = 0
+        self._live_jupyter_vis: int = 0
+
+    # ---- Lifecycle -----------------------------------------------------
+
+    def start_epoch(self, epoch: int) -> None:
+        """Resets per-epoch intra-metric delta states and execution timer."""
+        self._current_epoch = epoch
+        self._prev_train.clear()
+        self._epoch_start_time = time.perf_counter()
+        self._last_bar_line = ""
+        self._last_telemetry_line = ""
+        self._lines_on_screen = 0
+        self._last_render_time = 0.0
+        self._live_jupyter_raw = 0
+        self._live_jupyter_vis = 0
+
+    def tick(self, step: int, force: bool = False) -> None:
+        """
+        Pure host-side progress bar update.
+        """
+        if not self._is_live:
+            return
+
+        now = time.perf_counter()
+
+        if not (
+            force
+            or step >= self.total_steps
+            or self._last_render_time == 0.0
+            or (now - self._last_render_time) >= _MIN_REDRAW_INTERVAL
+        ):
+            return
+
+        self._last_render_time = now
+        self._last_bar_line = self._format_bar(step, now)
+        self._render()
+
+    def update_metrics(
+        self,
+        step: int,
+        loss: float,
+        acc: float,
+        lr: float,
+        reg_loss: float | None = None,
+    ) -> None:
+        """
+        Called exclusively inside `print_every` gates.
+        Computes metric deltas, updates telemetry, and executes a full redraw.
+        """
+        acc_pct = acc * 100.0 if 0.0 <= acc <= 1.0 else acc
+
+        loss_delta = _delta_str(
+            "loss", loss, self._prev_train.get("loss"), is_pct=False, use_color=self.use_color
+        )
+        acc_delta = _delta_str(
+            "acc", acc_pct, self._prev_train.get("acc"), is_pct=True, use_color=self.use_color
+        )
+
+        self._prev_train["loss"] = loss
+        self._prev_train["acc"] = acc_pct
+
+        self._last_telemetry_line = self._format_telemetry(
+            loss, acc_pct, lr, loss_delta, acc_delta, reg_loss
+        )
+
+        # A metrics update is a real information change, so it bypasses the
+        # redraw throttle.
+        self.tick(step, force=True)
+
+        if self.render_mode == "plain":
+            self._write(
+                f"Epoch {self._current_epoch}/{self.epochs} | "
+                f"Step {step}/{self.total_steps} | {self._last_telemetry_line}\n"
+            )
+            self._flush()
+
+    def commit_epoch(
+        self,
+        epoch: int,
+        epoch_loss: float,
+        epoch_acc: float,
+        lr: float,
+    ) -> None:
+        """
+        Freezes the completed bar into scrollback and writes the permanent
+        epoch summary -- replacing the live telemetry line under ``tty``,
+        landing beneath the combined live line under ``jupyter``.
+        """
+        dim, bright, reset = self._dim, self._bright, self._reset
+        summary = (
+            f"{bright}[Epoch {epoch}/{self.epochs} Total]{reset} "
+            f"{dim}loss:{reset} {epoch_loss:.4f} - "
+            f"{dim}acc:{reset} {epoch_acc:.4f} - "
+            f"{dim}lr:{reset} {lr:.6f}"
+        )
+
+        if self._lines_on_screen == 0:
+
+            self._write(f"{summary}\n")
+            self._flush()
+            self._reset_live_state()
+            return
+
+        final_bar = self._final_bar_line()
+
+        if self.render_mode == "tty":
+            if self._lines_on_screen == 2:
+                self._write(f"\033[1A\r\033[2K{final_bar}\n\033[2K{summary}\n")
+            else:
+                self._write(f"\r\033[2K{final_bar}\n{summary}\n")
+        else:
+            self._write(f"\r{self._pad_jupyter(self._combine(final_bar))}\n{summary}\n")
+
+        self._flush()
+        self._reset_live_state()
+
+    def commit_validation(self, val_loss: float, val_acc: float) -> None:
+        """Computes rolling epoch-over-epoch validation deltas and writes permanent summary."""
+        self._freeze_live_block()
+
+        val_acc_pct = val_acc * 100.0 if 0.0 <= val_acc <= 1.0 else val_acc
+
+        loss_delta = _delta_str(
+            "loss", val_loss, self._prev_val.get("loss"), is_pct=False, use_color=self.use_color
+        )
+        acc_delta = _delta_str(
+            "acc", val_acc_pct, self._prev_val.get("acc"), is_pct=True, use_color=self.use_color
+        )
+
+        loss_d_str = f" {loss_delta}" if loss_delta else ""
+        acc_d_str = f" {acc_delta}" if acc_delta else ""
+
+        if val_acc > self._best_val_acc:
+            self._best_val_acc = val_acc
+            badge = (
+                f"   {Fore.YELLOW}★ new best acc{Style.RESET_ALL}"
+                if self.use_color
+                else "   ★ new best acc"
+            )
+        else:
+            badge = ""
+
+        self._prev_val["loss"] = val_loss
+        self._prev_val["acc"] = val_acc_pct
+
+        dim, bright, reset = self._dim, self._bright, self._reset
+        self._write(
+            f"{bright}[Validation]{reset} "
+            f"{dim}loss{reset} {val_loss:.4f}{loss_d_str}   "
+            f"{dim}acc{reset} {val_acc_pct:.2f}%{acc_d_str}{badge}\n"
+        )
+        self._flush()
+
+    def close(self) -> None:
+        """Freezes any dangling live block and resets terminal color state."""
+        self._freeze_live_block()
+        if self.use_color:
+            self._write(Style.RESET_ALL)
+        self._flush()
+
+    # ---- Bar formatting ------------------------------------------
+
+    def _format_bar(self, step: int, now: float) -> str:
+        """
+        Single formatter for both the live and frozen frames.
+        """
+        elapsed = now - self._epoch_start_time
+        if step >= self.total_steps:
+            bar_idx, pct = 30, 100
+        else:
+            bar_idx = min(30, max(0, int(step * self._step_factor)))
+            pct = min(100, max(0, int(step * self._percent_factor)))
+
+        ips = step / elapsed if (elapsed > 0.0 and step > 0) else 0.0
+
+        return (
+            f"[{self._bar_lookup[bar_idx]}] {pct:>3d}%  "
+            f"Step {step:>{self._step_width}d}/{self.total_steps}  "
+            f"{ips:.1f} it/s  {_fmt_duration(elapsed)}"
+        )
+
+    def _final_bar_line(self) -> str:
+        """Completed-state bar: the live frame evaluated at `step == total_steps`."""
+        return self._format_bar(self.total_steps, time.perf_counter())
+
+    # ---- Telemetry formatting (AOT-selected variants) ----------------------
+
+    def _format_telemetry_reg(
+        self,
+        loss: float,
+        acc_pct: float,
+        lr: float,
+        loss_delta: str,
+        acc_delta: str,
+        reg_loss: float | None,
+    ) -> str:
+        dim, reset = self._dim, self._reset
+        reg_str = f"{reg_loss:.4f}" if reg_loss is not None else "  --  "
+        return (
+            f"{dim}loss{reset} {loss:.4f}{loss_delta} "
+            f"{dim}acc{reset} {acc_pct:.2f}%{acc_delta} "
+            f"{dim}reg{reset} {reg_str}   "
+            f"{dim}lr{reset} {lr:.2e}"
+        )
+
+    def _format_telemetry_plain(
+        self,
+        loss: float,
+        acc_pct: float,
+        lr: float,
+        loss_delta: str,
+        acc_delta: str,
+        reg_loss: float | None = None,
+    ) -> str:
+        dim, reset = self._dim, self._reset
+        return (
+            f"{dim}loss{reset} {loss:.4f}{loss_delta} "
+            f"{dim}acc{reset} {acc_pct:.2f}%{acc_delta}   "
+            f"{dim}lr{reset} {lr:.2e}"
+        )
+
+    # ---- Rendering --------------------------------------------
+
+    def _render_tty(self) -> None:
+        """Two-line in-place redraw. Cursor invariant: rests at end of last live line."""
+        if self._last_telemetry_line:
+            if self._lines_on_screen == 2:
+                self._write(
+                    f"\033[1A\r\033[2K{self._last_bar_line}\n\033[2K{self._last_telemetry_line}"
+                )
+            else:
+                if self._lines_on_screen == 1:
+                    self._write(f"\r\033[2K{self._last_bar_line}\n{self._last_telemetry_line}")
+                else:
+                    self._write(f"{self._last_bar_line}\n{self._last_telemetry_line}")
+                self._lines_on_screen = 2
+        else:
+            if self._lines_on_screen == 1:
+                self._write(f"\r\033[2K{self._last_bar_line}")
+            elif self._lines_on_screen == 2:
+                self._write(f"\033[1A\r\033[2K{self._last_bar_line}\n\033[2K")
+                self._lines_on_screen = 1
+            else:
+                self._write(self._last_bar_line)
+                self._lines_on_screen = 1
+        self._flush()
+
+    def _combine(self, bar_line: str) -> str:
+        """Jupyter draws bar and telemetry as one line; tty keeps them apart."""
+        return (
+            f"{bar_line} | {self._last_telemetry_line}"
+            if self._last_telemetry_line
+            else bar_line
+        )
+
+    def _render_jupyter(self) -> None:
+        self._write(f"\r{self._pad_jupyter(self._combine(self._last_bar_line))}")
+        self._flush()
+        self._lines_on_screen = 1
+
+    def _pad_jupyter(self, line: str) -> str:
+        """
+        Right-pads a jupyter frame so it fully covers the frame it overwrites.
+        """
+        raw, vis = len(line), _visible_len(line)
+        pad = max(self._live_jupyter_raw - raw, self._live_jupyter_vis - vis)
+
+        if pad > 0:
+            line = f"{line}{' ' * pad}"
+            raw += pad
+            vis += pad
+
+        self._live_jupyter_raw = raw
+        self._live_jupyter_vis = vis
+        return line
+
+    def _render_noop(self) -> None:
+        """Plain mode: no live surface to maintain."""
+        return
+    
+    # ---- Freeze helpers -----------------------------------
+
+    def _freeze_live_block(self) -> None:
+        """
+        Commits the live lines to scrollback without destroying them, then
+        drops the cursor to a fresh line. No-op once already frozen.
+        """
+        if self._lines_on_screen == 0:
+            return
+
+        final_bar = self._final_bar_line()
+
+        if self.render_mode == "tty":
+            if self._lines_on_screen == 2:
+                self._write(
+                    f"\033[1A\r\033[2K{final_bar}\n\033[2K{self._last_telemetry_line}\n"
+                )
+            else:
+                self._write(f"\r\033[2K{final_bar}\n")
+        else:  # jupyter -- single combined live line, frozen as drawn
+            self._write(f"\r{self._pad_jupyter(self._combine(final_bar))}\n")
+
+        self._flush()
+        self._reset_live_state()
+
+    def _reset_live_state(self) -> None:
+        """
+        Clears redraw bookkeeping so the next `_render` starts a fresh block
+        rather than walking the cursor back into committed history.
+        """
+        self._lines_on_screen = 0
+        self._last_bar_line = ""
+        self._last_telemetry_line = ""
+        self._last_render_time = 0.0
+        self._live_jupyter_raw = 0
+        self._live_jupyter_vis = 0
+
+
+#: Shared stateless instance. `_NullProgress` holds no state, so one object
+#: serves every silent run rather than allocating per `train()` call.
+NULL_PROGRESS = _NullProgress()
+
+
+def make_progress(
+    verbose: int,
+    total_steps: int,
+    epochs: int,
+    has_reg: bool = False,
+    render_for: str | None = None,
+) -> TrainingProgress | _NullProgress:
+    """
+    Maps a verbosity level onto a display object.
+
+    Verbosity is user policy; render mode is an environment fact. The two are
+    kept apart deliberately -- this function owns the policy mapping, while
+    ``_detect_render_mode`` stays a pure environment probe that can be unit
+    tested on its own.
+
+    Parameters
+    ----------
+    verbose : int
+        ``0`` silent, ``1`` live bar with autodetected render mode,
+        ``2`` forced plain text. ``bool`` is a subclass of ``int``, so legacy
+        ``True`` / ``False`` callers map to ``1`` / ``0`` unchanged.
+    total_steps : int
+        Training batches in a single epoch.
+    epochs : int
+        Total number of training epochs.
+    has_reg : bool, default=False
+        Whether the model carries regularization loss.
+    render_for : str, optional
+        Escape hatch that pins the render mode outright, bypassing both
+        autodetection and the ``verbose == 2`` mapping. Intended for tests,
+        which should not have to monkeypatch global stdout state to exercise
+        a specific branch.
+
+    Returns
+    -------
+    TrainingProgress | _NullProgress
+        Always call-compatible; the caller never branches on the result.
+
+    Notes
+    -----
+    At ``verbose == 1`` on a non-tty (piped output, CI, ``nohup``),
+    autodetection resolves to ``plain`` anyway. Levels 1 and 2 therefore
+    converge off-terminal -- ``2`` means "plain *even on a terminal*".
+    """
+    if verbose <= 0:
+        return NULL_PROGRESS
+
+    if render_for is None and verbose >= 2:
+        render_for = "plain"
+
+    return TrainingProgress(
+        total_steps=total_steps,
+        epochs=epochs,
+        has_reg=has_reg,
+        render_for=render_for,
+    )
