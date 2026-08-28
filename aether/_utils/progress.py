@@ -11,6 +11,7 @@ import sys
 import time
 from typing import Callable, Literal
 from aether._utils.null_objects import _NullProgress
+
 RenderMode = Literal["tty", "jupyter", "plain"]
 
 # ~30 Hz. Above this, redraws are imperceptible and cost one write+flush
@@ -97,10 +98,11 @@ def _delta_str(
     val_diff = abs(diff)
 
     if is_pct:
-        diff_val = val_diff * 100.0 if val_diff <= 1.0 else val_diff
-        content = f" {glyph}{diff_val:>5.2f}%"
+        formatted = f"{glyph}{val_diff:.2f}%"
     else:
-        content = f" {glyph}{val_diff:>6.4f}"
+        formatted = f"{glyph}{val_diff:.4f}"
+
+    content = f"{formatted:>8}"
 
     if not use_color:
         return content
@@ -280,17 +282,17 @@ class TrainingProgress:
         landing beneath the combined live line under ``jupyter``.
         """
         self._final_train_loss = epoch_loss
+        epoch_acc_pct = epoch_acc * 100.0
 
         dim, bright, reset = self._dim, self._bright, self._reset
         summary = (
             f"{bright}[Epoch {epoch}/{self.epochs} Total]{reset} "
             f"{dim}loss:{reset} {epoch_loss:.4f} - "
-            f"{dim}acc:{reset} {epoch_acc:.4f} - "
+            f"{dim}acc:{reset} {epoch_acc_pct:.2f}% - "
             f"{dim}lr:{reset} {lr:.6f}"
         )
 
         if self._lines_on_screen == 0:
-
             self._write(f"{summary}\n")
             self._flush()
             self._reset_live_state()
@@ -342,8 +344,8 @@ class TrainingProgress:
         dim, bright, reset = self._dim, self._bright, self._reset
         self._write(
             f"{bright}[Validation]{reset} "
-            f"{dim}loss{reset} {val_loss:.4f}{loss_d_str}   "
-            f"{dim}acc{reset} {val_acc_pct:.2f}%{acc_d_str}{badge}\n"
+            f"{dim}loss:{reset} {val_loss:.4f}{loss_d_str}   "
+            f"{dim}acc:{reset} {val_acc_pct:.2f}%{acc_d_str}{badge}\n"
         )
         self._flush()
 
@@ -507,7 +509,7 @@ class TrainingProgress:
     def _render_noop(self) -> None:
         """Plain mode: no live surface to maintain."""
         return
-    
+
     # ---- Freeze helpers -----------------------------------
 
     def _freeze_live_block(self) -> None:
@@ -561,17 +563,11 @@ def make_progress(
     """
     Maps a verbosity level onto a display object.
 
-    Verbosity is user policy; render mode is an environment fact. The two are
-    kept apart deliberately -- this function owns the policy mapping, while
-    ``_detect_render_mode`` stays a pure environment probe that can be unit
-    tested on its own.
-
     Parameters
     ----------
     verbose : int
         ``0`` silent, ``1`` live bar with autodetected render mode,
-        ``2`` forced plain text. ``bool`` is a subclass of ``int``, so legacy
-        ``True`` / ``False`` callers map to ``1`` / ``0`` unchanged.
+        ``2`` forced plain text.
     total_steps : int
         Training batches in a single epoch.
     epochs : int
@@ -579,21 +575,12 @@ def make_progress(
     has_reg : bool, default=False
         Whether the model carries regularization loss.
     render_for : str, optional
-        Escape hatch that pins the render mode outright, bypassing both
-        autodetection and the ``verbose == 2`` mapping. Intended for tests,
-        which should not have to monkeypatch global stdout state to exercise
-        a specific branch.
+        Escape hatch that pins the render mode outright.
 
     Returns
     -------
     TrainingProgress | _NullProgress
         Always call-compatible; the caller never branches on the result.
-
-    Notes
-    -----
-    At ``verbose == 1`` on a non-tty (piped output, CI, ``nohup``),
-    autodetection resolves to ``plain`` anyway. Levels 1 and 2 therefore
-    converge off-terminal -- ``2`` means "plain *even on a terminal*".
     """
     if verbose <= 0:
         return NULL_PROGRESS
