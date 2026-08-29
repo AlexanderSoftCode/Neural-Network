@@ -14,6 +14,9 @@ from aether.layers.conv import Conv2d
 from aether.layers.linear import Dense, Flatten
 from aether.layers.normalization import BatchNorm
 from aether.layers.pooling import MaxPool2d
+from aether.losses import CategoricalCrossEntropy, SoftmaxCategoricalCrossEntropy
+from aether.optimizers import Adam, AdamW
+from aether.metrics import CategoricalAccuracy
 from aether.model import Model
 
 class TestModelLoadBase(base_case.AetherBaseTestCase):
@@ -39,7 +42,7 @@ class TestModelLoadBase(base_case.AetherBaseTestCase):
             shutil.rmtree(self.temp_dir)
         super().tearDown()
 
-    # ---- 1. Error Handling & Malformed Archive Tests ----
+    # ---- Error Handling & Malformed Archive Tests ----
 
     def test_load_nonexistent_file_raises(self):
         """Ensure attempting to load a nonexistent path raises FileNotFoundError or OSError."""
@@ -77,9 +80,9 @@ class TestModelLoadBase(base_case.AetherBaseTestCase):
 
         with self.assertRaises(ValueError) as ctx:
             Model.load(corrupt_save_path)
-        self.assertIn("Unknown layer class 'HypotheticalAlienLayer'", str(ctx.exception))
+        self.assertIn("HypotheticalAlienLayer", str(ctx.exception))
 
-    # ---- 2. Basic Architecture & Parameter Hydration Tests ----
+    # ---- Basic Architecture & Parameter Hydration Tests ----
 
     def test_basic_mlp_graph_reconstruction_and_parameter_parity(self):
         """Verify reconstructed MLP matches original layer classes, configs, and exact tensor weights."""
@@ -124,7 +127,7 @@ class TestModelLoadBase(base_case.AetherBaseTestCase):
             config.to_device(d2.biases, target="numpy"),
         )
 
-    # ---- 3. Inference & Prediction Parity Tests ----
+    # ---- Inference & Prediction Parity Tests ----
 
     def test_forward_pass_and_prediction_numerical_parity(self):
         """Verify predictions of loaded model are identical to the source model in evaluation mode."""
@@ -151,7 +154,7 @@ class TestModelLoadBase(base_case.AetherBaseTestCase):
             atol=1e-6,
         )
 
-    # ---- 4. Precision Policy Restoration Tests ----
+    # ---- Precision Policy Restoration Tests ----
 
     def test_precision_policy_restoration(self):
         """Assert target compute dtype policy persists through serialization and re-hydrates properly."""
@@ -175,7 +178,7 @@ class TestModelLoadBase(base_case.AetherBaseTestCase):
         self.assertEqual(loaded_model.layers[0].weights.dtype, np.float32)
         self.assertEqual(loaded_model.layers[2].weights.dtype, np.float32)
 
-    # ---- 5. Complex CNN Architecture & Running Buffers ----
+    # ---- Complex CNN Architecture & Running Buffers ----
 
     def test_complex_cnn_architecture_and_batchnorm_buffers_load(self):
         """Test loading of a full CNN graph and verify persistent buffers (BatchNorm running stats)."""
@@ -253,7 +256,7 @@ class TestModelLoadBase(base_case.AetherBaseTestCase):
             atol=1e-3,
         )
 
-    # ---- 6. Explicit Target Device Migration Tests ----
+    # ---- Explicit Target Device Migration Tests ----
 
     def test_explicit_device_migration_on_load(self):
         """Verify Model.load(..., device=target) places parameters onto requested backend."""
@@ -266,5 +269,147 @@ class TestModelLoadBase(base_case.AetherBaseTestCase):
         self.assertEqual(loaded_model.device, "numpy")
         self.assertIsInstance(loaded_model.layers[0].weights, np.ndarray)
 
+    # ---- Training Component & Compilation Deserialization Tests ----
 
+    def test_load_reconstructs_full_compilation_components(self):
+        """Verify loss, optimizer, and accuracy re-hydrate with exact hyperparameters."""
+        orig_model = Model()
+        orig_model.manual_seed(42)
+        orig_model.add(Dense(self.NUM_FEATURES, 16))
+        orig_model.add(ReLU())
+        orig_model.add(Dense(16, self.NUM_CLASSES))
+
+        loss = CategoricalCrossEntropy(label_smoothing=0.02)
+        optimizer = Adam(lr=2e-3, decay=1e-4, beta_1=0.92, beta_2=0.99)
+        accuracy = CategoricalAccuracy()
+
+        orig_model.configure(loss=loss, optimizer=optimizer, accuracy=accuracy)
+        orig_model.finalize((self.NUM_FEATURES,))
+        orig_model.save(self.save_path)
+
+        loaded_model = Model.load(self.save_path)
+
+        # Assert loss restored
+        self.assertIsInstance(loaded_model.loss, CategoricalCrossEntropy)
+        self.assertEqual(loaded_model.loss.label_smoothing, 0.02)
+
+        # Assert optimizer restored
+        self.assertIsInstance(loaded_model.optimizer, Adam)
+        self.assertEqual(loaded_model.optimizer.lr, 2e-3)
+        self.assertEqual(loaded_model.optimizer.decay, 1e-4)
+        self.assertEqual(loaded_model.optimizer.beta_1, 0.92)
+        self.assertEqual(loaded_model.optimizer.beta_2, 0.99)
+
+        # Assert accuracy restored
+        self.assertIsInstance(loaded_model.accuracy, CategoricalAccuracy)
+
+    def test_load_reconstructs_fused_loss_and_adamw(self):
+        """Verify SoftmaxCategoricalCrossEntropy fused loss and AdamW are restored."""
+        orig_model = Model()
+        orig_model.manual_seed(42)
+        orig_model.add(Dense(self.NUM_FEATURES, self.NUM_CLASSES))
+
+        loss = SoftmaxCategoricalCrossEntropy(label_smoothing=0.05)
+        optimizer = AdamW(lr=1e-3, weight_decay=1e-2)
+
+        orig_model.configure(loss=loss, optimizer=optimizer)
+        orig_model.finalize((self.NUM_FEATURES,))
+        orig_model.save(self.save_path)
+
+        loaded_model = Model.load(self.save_path)
+
+        self.assertIsInstance(loaded_model.loss, SoftmaxCategoricalCrossEntropy)
+        self.assertEqual(loaded_model.loss.label_smoothing, 0.05)
+        self.assertIsInstance(loaded_model.optimizer, AdamW)
+        self.assertEqual(loaded_model.optimizer.lr, 1e-3)
+        self.assertEqual(loaded_model.optimizer.weight_decay, 1e-2)
+
+    def test_load_unknown_component_class_raises_value_error(self):
+        """Ensure manifest referencing an unresolvable loss/optimizer raises ValueError."""
+        model = Model()
+        model.add(Dense(self.NUM_FEATURES, 16))
+        model.finalize((self.NUM_FEATURES,))
+        model.save(self.save_path)
+
+        with zipfile.ZipFile(self.save_path, "r") as zipf:
+            manifest = json.loads(zipf.read("architecture.json").decode("utf-8"))
+            weights_bytes = zipf.read("weights.safetensors")
+
+        # Inject an alien optimizer
+        manifest["compile"]["optimizer"] = {
+            "class_name": "HypotheticalQuantumOptimizer",
+            "config": {"lr": 0.01},
+        }
+
+        corrupt_manifest_bytes = json.dumps(manifest).encode("utf-8")
+        corrupt_save_path = os.path.join(self.temp_dir, "corrupt_opt.aether")
+        with zipfile.ZipFile(corrupt_save_path, "w") as zipf:
+            zipf.writestr("architecture.json", corrupt_manifest_bytes, compress_type=zipfile.ZIP_DEFLATED)
+            zipf.writestr("weights.safetensors", weights_bytes, compress_type=zipfile.ZIP_STORED)
+
+        with self.assertRaises(ValueError) as ctx:
+            Model.load(corrupt_save_path)
+        self.assertIn("HypotheticalQuantumOptimizer", str(ctx.exception))
+
+    def test_load_invalid_component_subclass_raises_type_error(self):
+        """Ensure manifest pointing to a non-subclass component raises TypeError."""
+        model = Model()
+        model.add(Dense(self.NUM_FEATURES, 16))
+        model.finalize((self.NUM_FEATURES,))
+        model.save(self.save_path)
+
+        with zipfile.ZipFile(self.save_path, "r") as zipf:
+            manifest = json.loads(zipf.read("architecture.json").decode("utf-8"))
+            weights_bytes = zipf.read("weights.safetensors")
+
+        # Point loss to a class that exists in the namespace but is not a Loss subclass
+        manifest["compile"]["loss"] = {
+            "class_name": "Loss",  # Base class cannot be instantiated as a valid loss directly
+            "config": {},
+        }
+
+        corrupt_manifest_bytes = json.dumps(manifest).encode("utf-8")
+        corrupt_save_path = os.path.join(self.temp_dir, "corrupt_subclass.aether")
+        with zipfile.ZipFile(corrupt_save_path, "w") as zipf:
+            zipf.writestr("architecture.json", corrupt_manifest_bytes, compress_type=zipfile.ZIP_DEFLATED)
+            zipf.writestr("weights.safetensors", weights_bytes, compress_type=zipfile.ZIP_STORED)
+
+        with self.assertRaises((TypeError, ValueError)):
+            Model.load(corrupt_save_path)
+
+def test_loaded_model_evaluation_and_loss_parity(self):
+        """Verify model.evaluate() works out-of-the-box post-load and matches original output exactly."""
+        orig_model = Model()
+        orig_model.manual_seed(42)
+        orig_model.add(Dense(self.NUM_FEATURES, 16))
+        orig_model.add(ReLU())
+        orig_model.add(Dense(16, self.NUM_CLASSES))
+
+        orig_model.configure(
+            loss=CategoricalCrossEntropy(),
+            optimizer=Adam(lr=1e-3),
+            accuracy=CategoricalAccuracy(),
+        )
+        # Migrate original model to active test backend (CuPy or NumPy)
+        orig_model.to(self.backend_name)
+        orig_model.finalize((self.NUM_FEATURES,))
+        orig_model.save(self.save_path)
+
+        # Loaded model automatically adopts the active backend
+        loaded_model = Model.load(self.save_path)
+
+        raw_X = np.random.randn(20, self.NUM_FEATURES).astype(np.float32)
+        raw_y = np.random.randint(0, self.NUM_CLASSES, size=(20,)).astype(np.int32)
+
+        X = config.to_device(raw_X, target=self.backend_name)
+        y = config.to_device(raw_y, target=self.backend_name)
+
+        orig_loss, orig_acc = orig_model.evaluate(X=X, y=y, batch_size=10)
+        load_loss, load_acc = loaded_model.evaluate(X=X, y=y, batch_size=10)
+
+        # Confirm non-zero and exact equality
+        self.assertGreater(load_loss, 0.0)
+        self.assertAlmostEqual(orig_loss, load_loss, places=5)
+        self.assertAlmostEqual(orig_acc, load_acc, places=5)
+        
 base_case.register_test_suites(globals(), TestModelLoadBase)

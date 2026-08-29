@@ -13,14 +13,14 @@ class TestAdamW(BaseTestOptimizerAdam):
         self.layer.dbiases = self.xp.zeros_like(self.layer.biases)
 
         self.optimizer.weight_decay = 0.1
-        learning_rate = self.optimizer.current_learning_rate
+        lr = self.optimizer.current_lr
         weights_before = self.layer.weights.copy()
         biases_before = self.layer.biases.copy()
 
         self.optimizer.step()
 
         # With zero gradients, parameters should change strictly due to decoupled decay
-        expected_weights = weights_before - (learning_rate * 0.1 * weights_before)
+        expected_weights = weights_before - (lr * 0.1 * weights_before)
         self.xp.testing.assert_array_almost_equal(
             self.layer.weights, expected_weights, decimal=5
         )

@@ -14,6 +14,9 @@ from aether.layers.conv import Conv2d
 from aether.layers.linear import Dense, Flatten
 from aether.layers.normalization import BatchNorm
 from aether.layers.pooling import MaxPool2d
+from aether.losses import CategoricalCrossEntropy, SoftmaxCategoricalCrossEntropy
+from aether.optimizers import Adam, AdamW
+from aether.metrics import Accuracy
 from aether.model import Model
 
 
@@ -40,7 +43,7 @@ class TestModelSaveBase(base_case.AetherBaseTestCase):
             shutil.rmtree(self.temp_dir)
         super().tearDown()
 
-    # ---- 1. Precondition & Guardrail Tests ----
+    # ---- Precondition & Guardrail Tests ----
 
     def test_save_unfinalized_model_raises(self):
         """Ensure calling save() on an unfinalized graph immediately raises RuntimeError."""
@@ -50,7 +53,7 @@ class TestModelSaveBase(base_case.AetherBaseTestCase):
         with self.assertRaises(RuntimeError):
             model.save(self.save_path)
 
-    # ---- 2. Archive Container & Compression Tests ----
+    # ---- Archive Container & Compression Tests ----
 
     def test_archive_structure_and_compression_modes(self):
         """Verify .aether zip bundle contains both manifest and weights with correct compression flags."""
@@ -75,7 +78,7 @@ class TestModelSaveBase(base_case.AetherBaseTestCase):
             self.assertEqual(info_json.compress_type, zipfile.ZIP_DEFLATED)
             self.assertEqual(info_weights.compress_type, zipfile.ZIP_STORED)
 
-    # ---- 3. Manifest Integrity & Layer Metadata Tests ----
+    # ---- Manifest Integrity & Layer Metadata Tests ----
 
     def test_manifest_metadata_and_layer_configs(self):
         """Assert schema_version, input_shape, precision policy, and layer configs serialize accurately."""
@@ -131,7 +134,7 @@ class TestModelSaveBase(base_case.AetherBaseTestCase):
             out_dense_cfg["config"]["n_neurons"], self.NUM_CLASSES
         )
 
-    # ---- 4. Parameter Extraction, Contiguity, and Cross-Backend Tests ----
+    # ---- Parameter Extraction, Contiguity, and Cross-Backend Tests ----
 
     def test_safetensors_tensor_payload_and_contiguity(self):
         """Verify tensors convert to CPU NumPy, remain C-contiguous, and match memory parameter values."""
@@ -177,7 +180,7 @@ class TestModelSaveBase(base_case.AetherBaseTestCase):
             config.to_device(dense2.biases, target="numpy"),
         )
 
-    # ---- 5. Complex Multi-Layer Graph (Conv, Pool, BatchNorm) ----
+    # ---- Complex Multi-Layer Graph (Conv, Pool, BatchNorm) ----
 
     def test_complex_cnn_architecture_save(self):
         """Test serialization of a full CNN pipeline containing Conv, MaxPool2d, BatchNorm, and Flatten."""
@@ -235,5 +238,103 @@ class TestModelSaveBase(base_case.AetherBaseTestCase):
         self.assertIn("5.weights", weights)
         self.assertIn("5.biases", weights)
 
+        # ---- Compile Dictionary Serialization Tests ----
 
+    def test_save_unconfigured_model_serializes_null_compile_entries(self):
+        """Verify unconfigured/uncompiled models serialize null/None entries in the compile section."""
+        model = Model()
+        model.add(Dense(self.NUM_FEATURES, 16))
+        model.finalize((self.NUM_FEATURES,))
+
+        model.save(self.save_path)
+
+        with zipfile.ZipFile(self.save_path, "r") as zipf:
+            manifest = json.loads(zipf.read("architecture.json").decode("utf-8"))
+
+        self.assertIn("compile", manifest)
+        compile_cfg = manifest["compile"]
+        self.assertIsNone(compile_cfg["loss"])
+        self.assertIsNone(compile_cfg["optimizer"])
+        self.assertIsNone(compile_cfg["accuracy"])
+
+    def test_save_configured_training_components_manifest(self):
+        """Verify compiled loss, optimizer, and accuracy configs serialize accurately to compile key."""
+        model = Model()
+        model.add(Dense(self.NUM_FEATURES, 16))
+        model.add(ReLU())
+        model.add(Dense(16, self.NUM_CLASSES))
+
+        loss = CategoricalCrossEntropy(label_smoothing=0.01)
+        optimizer = Adam(lr=1e-3, decay=5e-5, beta_1=0.9, beta_2=0.999, epsilon=1e-7)
+        accuracy = Accuracy()
+
+        model.configure(
+            loss=loss,
+            optimizer=optimizer,
+            accuracy=accuracy,
+        )
+        model.finalize((self.NUM_FEATURES,))
+        model.save(self.save_path)
+
+        with zipfile.ZipFile(self.save_path, "r") as zipf:
+            manifest = json.loads(zipf.read("architecture.json").decode("utf-8"))
+
+        self.assertIn("compile", manifest)
+        compile_cfg = manifest["compile"]
+
+        # Validate Loss serialization
+        self.assertIsNotNone(compile_cfg["loss"])
+        self.assertEqual(compile_cfg["loss"]["class_name"], "CategoricalCrossEntropy")
+        self.assertEqual(compile_cfg["loss"]["config"]["label_smoothing"], 0.01)
+
+        # Validate Optimizer serialization
+        self.assertIsNotNone(compile_cfg["optimizer"])
+        self.assertEqual(compile_cfg["optimizer"]["class_name"], "Adam")
+        opt_cfg = compile_cfg["optimizer"]["config"]
+        self.assertEqual(opt_cfg["lr"], 1e-3)
+        self.assertEqual(opt_cfg["decay"], 5e-5)
+        self.assertEqual(opt_cfg["beta_1"], 0.9)
+        self.assertEqual(opt_cfg["beta_2"], 0.999)
+        self.assertEqual(opt_cfg["epsilon"], 1e-7)
+
+        # Validate Accuracy serialization
+        self.assertIsNotNone(compile_cfg["accuracy"])
+        self.assertEqual(compile_cfg["accuracy"]["class_name"], "Accuracy")
+        self.assertIsInstance(compile_cfg["accuracy"]["config"], dict)
+
+    def test_save_partial_configuration_with_fused_loss_and_adamw(self):
+        """Verify partial compilation with fused SoftmaxCategoricalCrossEntropy and AdamW serializes correctly."""
+        model = Model()
+        model.add(Dense(self.NUM_FEATURES, 16))
+
+        loss = SoftmaxCategoricalCrossEntropy(label_smoothing=0.05)
+        optimizer = AdamW(lr=1e-3, weight_decay=1e-2, beta_1=0.9, beta_2=0.999)
+
+        model.configure(
+            loss=loss,
+            optimizer=optimizer,
+        )
+        model.finalize((self.NUM_FEATURES,))
+        model.save(self.save_path)
+
+        with zipfile.ZipFile(self.save_path, "r") as zipf:
+            manifest = json.loads(zipf.read("architecture.json").decode("utf-8"))
+
+        self.assertIn("compile", manifest)
+        compile_cfg = manifest["compile"]
+
+        # Validate Fused Loss Serialization
+        self.assertIsNotNone(compile_cfg["loss"])
+        self.assertEqual(compile_cfg["loss"]["class_name"], "SoftmaxCategoricalCrossEntropy")
+        self.assertEqual(compile_cfg["loss"]["config"]["label_smoothing"], 0.05)
+
+        # Validate AdamW Optimizer Serialization
+        self.assertIsNotNone(compile_cfg["optimizer"])
+        self.assertEqual(compile_cfg["optimizer"]["class_name"], "AdamW")
+        opt_cfg = compile_cfg["optimizer"]["config"]
+        self.assertEqual(opt_cfg["lr"], 1e-3)
+        self.assertEqual(opt_cfg["weight_decay"], 1e-2)
+
+        # Accuracy omitted
+        self.assertIsNone(compile_cfg["accuracy"])
 base_case.register_test_suites(globals(), TestModelSaveBase)

@@ -26,7 +26,7 @@ class TestModelTrainBase(ModelBaseTestCase):
         self.model.add(Dense(n_inputs = 8, n_neurons=self.NUM_CLASSES))
 
         self.loss = CategoricalCrossEntropy()
-        self.optimizer = Adam(learning_rate=0.01)
+        self.optimizer = Adam(lr=0.01)
         self.accuracy = CategoricalAccuracy()
 
         self.model.configure(
@@ -99,7 +99,7 @@ class TestModelTrainBase(ModelBaseTestCase):
         model.add(Dense(n_inputs=4, n_neurons=self.NUM_CLASSES, l2=(0.01)))
         model.configure(
             loss=CategoricalCrossEntropy(),
-            optimizer=AdamW(learning_rate=0.01),
+            optimizer=AdamW(lr=0.01),
             accuracy=CategoricalAccuracy()
         )
         model.finalize(input_shape=(self.NUM_FEATURES,))

@@ -33,7 +33,7 @@ class ModelIntegrationBaseCase(base_case.AetherBaseTestCase):
         model.add(ae.Dense(64, self.NUM_CLASSES))
         model.configure(
             loss=ae.SoftmaxCategoricalCrossEntropy(label_smoothing=0.01),
-            optimizer=ae.Adam(learning_rate=0.001, decay=5e-5),
+            optimizer=ae.Adam(lr=0.001, decay=5e-5),
             accuracy=ae.CategoricalAccuracy(),
         )
         model.to(device if device is not None else self.backend_name)
@@ -50,7 +50,7 @@ class ModelIntegrationBaseCase(base_case.AetherBaseTestCase):
         model.add(ae.Dense(128, self.NUM_CLASSES))
         model.configure(
             loss=ae.SoftmaxCategoricalCrossEntropy(label_smoothing=0.01),
-            optimizer=ae.Adam(learning_rate=0.001, decay=5e-5),
+            optimizer=ae.Adam(lr=0.001, decay=5e-5),
             accuracy=ae.CategoricalAccuracy(),
         )
         model.to(device if device is not None else self.backend_name)

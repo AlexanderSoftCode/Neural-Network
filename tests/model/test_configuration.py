@@ -81,7 +81,7 @@ class TestModelConfig(ModelBaseTestCase):
         model.add(Dense(self.NUM_FEATURES, self.NUM_CLASSES))
         model.configure(
             loss=SoftmaxCategoricalCrossEntropy(),
-            optimizer=Adam(learning_rate=0.01),
+            optimizer=Adam(lr=0.01),
             accuracy=CategoricalAccuracy(),
         )
         model.finalize((self.NUM_FEATURES,))
@@ -112,7 +112,7 @@ class TestModelConfig(ModelBaseTestCase):
         model.add(Dense(self.NUM_FEATURES, self.NUM_CLASSES))
         model.configure(
             loss=SoftmaxCategoricalCrossEntropy(),
-            optimizer=Adam(learning_rate=0.01),
+            optimizer=Adam(lr=0.01),
             accuracy=CategoricalAccuracy(),
         )
         model.finalize((self.NUM_FEATURES,))

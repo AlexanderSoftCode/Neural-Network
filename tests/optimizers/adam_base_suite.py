@@ -22,7 +22,7 @@ class BaseTestOptimizerAdam(base_case.AetherBaseLayerTestCase):
 
         self.optimizer = self.make_component(
             self.OPTIMIZER_CLASS,
-            learning_rate=self.LR,
+            lr=self.LR,
             decay=self.DECAY,
             epsilon=self.EPSILON,
             beta_1=self.BETA_1,
@@ -62,7 +62,7 @@ class BaseTestOptimizerAdam(base_case.AetherBaseLayerTestCase):
 
         optimizer = self.make_component(
             Optimizer_Class,
-            learning_rate=0.01,
+            lr=0.01,
         )
         optimizer.init_params([layer])
         if hasattr(optimizer, "_compile_for_device"):
@@ -76,7 +76,7 @@ class BaseTestOptimizerAdam(base_case.AetherBaseLayerTestCase):
         """init_params should pre-allocate weight/bias momentum and cache in float32."""
         fresh_optimizer = self.make_component(
             self.OPTIMIZER_CLASS,
-            learning_rate=self.LR,
+            lr=self.LR,
         )
         fresh_layer = self.make_built_layer(
             Dense,
@@ -145,7 +145,7 @@ class BaseTestOptimizerAdam(base_case.AetherBaseLayerTestCase):
 
         optimizer = self.make_component(
             self.OPTIMIZER_CLASS,
-            learning_rate=0.01,
+            lr=0.01,
         )
         optimizer.init_params([biasless_layer])
         if hasattr(optimizer, "_compile_for_device"):
@@ -163,7 +163,7 @@ class BaseTestOptimizerAdam(base_case.AetherBaseLayerTestCase):
         """step() should decay current_learning_rate and increment iterations atomically."""
         decayed_optimizer = self.make_component(
             self.OPTIMIZER_CLASS,
-            learning_rate=0.1,
+            lr=0.1,
             decay=0.01,
         )
         decayed_optimizer.init_params([self.layer])
@@ -180,7 +180,7 @@ class BaseTestOptimizerAdam(base_case.AetherBaseLayerTestCase):
         decayed_optimizer.step()
         expected_lr = 0.1 * (1.0 / (1.0 + 0.01 * 1))
         self.assertAlmostEqual(
-            decayed_optimizer.current_learning_rate, expected_lr, places=6
+            decayed_optimizer.current_lr, expected_lr, places=6
         )
         self.assertEqual(decayed_optimizer.iterations, 2)
 
@@ -196,7 +196,7 @@ class BaseTestOptimizerAdam(base_case.AetherBaseLayerTestCase):
         beta_1 = self.optimizer.beta_1
         beta_2 = self.optimizer.beta_2
         eps = self.optimizer.epsilon
-        lr = self.optimizer.current_learning_rate
+        lr = self.optimizer.current_lr
 
         self.optimizer.step()
 
@@ -270,7 +270,7 @@ class BaseTestOptimizerAdam(base_case.AetherBaseLayerTestCase):
 
         optimizer = self.make_component(
             self.OPTIMIZER_CLASS,
-            learning_rate=0.01,
+            lr=0.01,
         )
         optimizer.init_params([layer])
         optimizer._compile_for_device("cupy")
