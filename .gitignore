@@ -1,8 +1,10 @@
 /data/
+CodeTest/
+saved_models/
+
 *.npz
 **__pycache__/
 *.egg-info/
-CodeTest/
 .devcontainer/.cupy_cache/
 .vscode/
 .venv/
