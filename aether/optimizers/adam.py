@@ -11,9 +11,9 @@ class Optimizer:
     and decoupled weight decay resolution.
     """
 
-    def __init__(self, learning_rate: float = 0.001, decay: float = 0.0):
-        self.learning_rate = learning_rate
-        self.current_learning_rate = learning_rate
+    def __init__(self, lr: float = 0.001, decay: float = 0.0):
+        self.lr = lr
+        self.current_lr = lr
         self.decay = decay
         self.iterations = 0
         self.layers = []
@@ -61,13 +61,22 @@ class Optimizer:
             f"Optimizer '{type(self).__name__}' must implement a step() method."
         )
 
+    def get_config(self) -> dict:
+        """Override to return constructor kwargs required to load optimzer.
+        Used by Model.save() / Model.load()."""
+        return {
+            "lr": float(self.lr),
+            "decay": float(self.decay),
+            "epsilon": float(self.epsilon),
+        }
+    
 # General starting learning rate for SGD is 1.0, with a decay down to 0.1. For Adam, a good starting 
 # LR is 0.001 (1e-3), decaying down to 0.0001 (1e-4). Different problems may require different 
 # values here, but these are decent to start.
 class Adam(Optimizer):
-    def __init__(self, learning_rate=.001, decay=0., epsilon=1e-7, beta_1=0.9, beta_2=.999):
+    def __init__(self, lr=.001, decay=0., epsilon=1e-7, beta_1=0.9, beta_2=.999):
 
-        super().__init__(learning_rate, decay)
+        super().__init__(lr, decay)
         self.epsilon = epsilon
         self.beta_1 = beta_1
         self.beta_2 = beta_2  # used to be known as our rho
@@ -115,8 +124,8 @@ class Adam(Optimizer):
     def step(self):
         """Unified optimizer entry point executed once per training step"""
         if self.decay:
-            self.current_learning_rate = np.float32(
-                self.learning_rate * (1.0 / (1.0 + self.decay * self.iterations))
+            self.current_lr = np.float32(
+                self.lr * (1.0 / (1.0 + self.decay * self.iterations))
             )
         t = self.iterations + 1
         bias_correction_1 = np.float32(1.0 - (self.beta_1 ** t))
@@ -173,7 +182,7 @@ class Adam(Optimizer):
         """
         kernel = self._adamw_kernel
 
-        lr = np.float32(self.current_learning_rate)
+        lr = np.float32(self.current_lr)
         beta1 = np.float32(self.beta_1)
         beta2 = np.float32(self.beta_2)
         eps = np.float32(self.epsilon)
@@ -216,7 +225,7 @@ class Adam(Optimizer):
     def _step_fallback(self, bias_correction_1, bias_correction_2):
         """CPU / NumPy vectorized update path."""
         xp = config.xp
-        learning_rate = np.float32(self.current_learning_rate)
+        learning_rate = np.float32(self.current_lr)
         epsilon = np.float32(self.epsilon)
         beta_1 = np.float32(self.beta_1)
         beta_2 = np.float32(self.beta_2)
@@ -258,11 +267,23 @@ class Adam(Optimizer):
             if hasattr(layer, "invalidate_shadow_caches"):
                 layer.invalidate_shadow_caches()
 
+    def get_config(self) -> dict:
+        config = super().get_config()
+        config.update({
+            "beta_1": float(self.beta_1),
+            "beta_2": float(self.beta_2),
+        })
+        return config
 class AdamW(Adam):
-    def __init__(self, learning_rate=.001, decay=0., epsilon=1e-7,
+    def __init__(self, lr=.001, decay=0., epsilon=1e-7,
                  beta_1=0.9, beta_2=.999, weight_decay=0.01):
         
-        super().__init__(learning_rate=learning_rate, decay=decay, epsilon=epsilon,
+        super().__init__(lr=lr, decay=decay, epsilon=epsilon,
                           beta_1=beta_1, beta_2=beta_2)
 
         self.weight_decay = weight_decay
+
+    def get_config(self) -> dict:
+        config = super().get_config()
+        config["weight_decay"] = float(self.weight_decay)
+        return config

@@ -45,7 +45,15 @@ class Loss:
                 f"[aether] '{type(self).__name__}' operates directly on unnormalized logits. "
                 f"Do not add an explicit '{prohibited_names}' layer immediately preceding this loss."
             )
-        
+
+    def get_config(self) -> dict:
+        """Override to return constructor kwargs required to reconstruct the loss.
+        Used by Model.save() / Model.load()."""
+        return {
+            "label_smoothing": (
+                float(self.label_smoothing) if self.label_smoothing is not None else None
+            ),
+        }
     def remember_trainable_layers(self, trainable_layers):
         self.trainable_layers = trainable_layers
 

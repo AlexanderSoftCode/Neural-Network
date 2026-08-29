@@ -1,20 +1,69 @@
 import json
 import zipfile
+from pathlib import Path
 import numpy as np
 
 import aether.config as config
 import aether.layers as layer_module
+import aether.losses as loss_module
+import aether.metrics as metric_module
+import aether.optimizers as optimizer_module
 
 from aether.base import Layer
-from aether.losses import Loss
-from aether.metrics import Accuracy
-from aether.optimizers import Optimizer
 from aether._utils import NullAccuracy, NullOptimizer
 from aether._utils.progress import make_progress
 try:
     import safetensors.numpy
 except ImportError:
     safetensors = None
+
+_COMPONENT_NAMESPACES = {
+    "loss": (loss_module, loss_module.Loss),
+    "optimizer": (optimizer_module, optimizer_module.Optimizer),
+    "accuracy": (metric_module, metric_module.Accuracy),
+}
+
+def _serialize_component(obj):
+    if obj is None or isinstance(obj, (NullOptimizer, NullAccuracy)):
+        return None
+    return {
+        "class_name": type(obj).__name__,
+        "config": obj.get_config(),
+    }
+
+
+def _resolve_component(entry, kind):
+    """Reconstructs a training component from a {class_name, config} manifest entry."""
+    if not entry:
+        return None
+
+    class_name = entry["class_name"]
+    cfg = entry.get("config") or {}
+
+    namespace, base_cls = _COMPONENT_NAMESPACES[kind]
+    component_cls = getattr(namespace, class_name, None)
+
+    # Unknown class check
+    if component_cls is None:
+        raise ValueError(
+            f"[aether] Unknown {kind} class '{class_name}' found in saved manifest. "
+            f"Only classes defined in '{namespace.__name__}' can be deserialized."
+        )
+
+    # Base class rejection
+    if component_cls is base_cls or not (isinstance(component_cls, type) and issubclass(component_cls, base_cls)):
+        raise TypeError(
+            f"[aether] Manifest entry '{class_name}' is not a valid concrete "
+            f"'{base_cls.__name__}' subclass."
+        )
+
+    try:
+        return component_cls(**cfg)
+    except TypeError as exc:
+        raise TypeError(
+            f"[aether] Could not reconstruct {kind} '{class_name}' from saved config "
+            f"{cfg}. The class signature may have changed since the model was saved."
+        ) from exc
 
 class Model():
     def __init__(self):
@@ -54,7 +103,7 @@ class Model():
             )
 
         if loss is not None:
-            if not isinstance(loss, Loss):
+            if not isinstance(loss, loss_module.Loss):
                 raise TypeError(
                     f"Expected an instance of 'Loss', but got {type(loss).__name__}."
                     "Make sure the loss your are passing in inherits from aether.losses.loss"
@@ -63,7 +112,7 @@ class Model():
                 self.loss = loss
 
         if optimizer is not None:
-            if not isinstance(optimizer, Optimizer):
+            if not isinstance(optimizer, optimizer_module.Optimizer):
                 raise TypeError(
                     f"Expected an instance of 'Optimizer', but got '{type(optimizer).__name__}'. "
                     "Make sure the optimizer you are passing in inherits from aether.optimizers.Optimizer."
@@ -72,7 +121,7 @@ class Model():
                 self.optimizer = optimizer
 
         if accuracy is not None:
-            if not isinstance(accuracy, Accuracy):
+            if not isinstance(accuracy, metric_module.Accuracy):
                 raise TypeError(
                     f"Object '{type(accuracy).__name__}' is not a valid accuracy metric."
                     "Make sure the accuracy your passing in inherits from aether.metrics.accuracy"
@@ -371,7 +420,7 @@ class Model():
                 step_optimizer()
                 return data_l, 0.0, acc_l
 
-        get_lr = lambda: getattr(optimizer_obj, "current_learning_rate", getattr(optimizer_obj, "lr", None))
+        get_lr = lambda: getattr(optimizer_obj, "current_lr", getattr(optimizer_obj, "lr", None))
 
         progress = make_progress(verbose, train_steps, epochs, has_reg)
 
@@ -419,13 +468,13 @@ class Model():
 
         progress.close()
 
-    def evaluate(self, X_val, y_val, *, batch_size=None, verbose=1):
+    def evaluate(self, X, y, *, batch_size=None, verbose=1):
         """
         Evaluate the model's loss and metrics on validation/test data in inference mode.
 
         Args:
-            X_val (ndarray): Evaluation input features (NumPy or CuPy ndarray).
-            y_val (ndarray): Ground truth labels or targets.
+            X (ndarray): Evaluation input features (NumPy or CuPy ndarray).
+            y (ndarray): Ground truth labels or targets.
             batch_size (int, optional): Mini-batch size. Defaults to None (full-batch).
             verbose (int | bool, optional): Verbosity mode for evaluation.
                 - `0` / `False`: Silent mode (no output printed).
@@ -441,8 +490,8 @@ class Model():
                 "[aether] Model must be explicitly finalized before evaluation. "
                 "Call model.finalize(input_shape) first."
             )
-        self._assert_device_alignment(X_val, y_val)
-        num_samples = len(X_val)
+        self._assert_device_alignment(X, y)
+        num_samples = len(X)
         effective_batch_size = batch_size if batch_size is not None else num_samples
         eval_steps = (num_samples + effective_batch_size - 1) // effective_batch_size
 
@@ -465,8 +514,8 @@ class Model():
             start_idx = step * effective_batch_size
             end_idx = min(start_idx + effective_batch_size, num_samples)
 
-            batch_X = X_val[start_idx:end_idx]
-            batch_y = y_val[start_idx:end_idx]
+            batch_X = X[start_idx:end_idx]
+            batch_y = y[start_idx:end_idx]
 
             # Forward propagation in evaluation mode
             output = forward_fn(batch_X, training=False)
@@ -556,6 +605,7 @@ class Model():
         Raises:
             RuntimeError: If model is not finalized.
             ImportError: If safetensors is not installed.
+            FileNotFoundError: If the directory being saved to does not exist.
         """
         if not self.is_finalized:
             raise RuntimeError(
@@ -568,6 +618,15 @@ class Model():
                 "[aether] 'safetensors' is required for model serialization. "
                 "Install it with `pip install safetensors`."
             )
+
+        path = Path(filepath)
+        if not path.parent.exists():
+            raise FileNotFoundError(
+                f"[aether] Directory '{path.parent}' does not exist. "
+                f"Please create the directory before saving the model."
+            )
+        if path.suffix != ".aether":
+            path = path.with_name(path.name + ".aether")
 
         # Capture Top-Level Config & Layer Manifest
         input_shape = self.layers[0].input_shape
@@ -582,6 +641,11 @@ class Model():
             "input_shape": list(input_shape),
             "seed": self._seed,
             "precision_policy": precision_str,
+            "compile":{
+                "loss": _serialize_component(self.loss),
+                "optimizer": _serialize_component(self.optimizer),
+                "accuracy": _serialize_component(self.accuracy),
+            },
             "layers": [
                 {
                     "index": idx,
@@ -603,7 +667,7 @@ class Model():
         weights_bytes = safetensors.numpy.save(weight_dict)
         arch_json_bytes = json.dumps(arch_manifest, indent=2).encode("utf-8")
 
-        with zipfile.ZipFile(filepath, "w") as zipf:
+        with zipfile.ZipFile(path, "w") as zipf:
             zipf.writestr(
                 "architecture.json", arch_json_bytes, compress_type=zipfile.ZIP_DEFLATED
             )
@@ -613,7 +677,13 @@ class Model():
 
     @classmethod
     def load(cls, filepath: str, device: str | None = None) -> "Model":
-        """Loads a model architecture and parameters from an .aether zip archive.
+        """Loads a model architecture, training components, and parameters from an
+        .aether zip archive.
+
+        The returned model is fully configured and finalized: the loss, optimizer,
+        and accuracy metric recorded at save time are reconstructed and attached
+        before finalize(), so evaluate(), predict(), and train() are immediately
+        usable without a second configure() call.
 
         Args:
             filepath (str): Path to the saved .aether model file.
@@ -621,7 +691,18 @@ class Model():
                 Defaults to None (uses current active backend).
 
         Returns:
-            Model: A finalized and initialized Model instance.
+            Model: A configured, finalized, and initialized Model instance.
+
+        Raises:
+            ImportError: If safetensors is not installed.
+            FileNotFoundError: If the archive does not exist.
+            ValueError: If the manifest was written by a newer schema major version,
+                or references an unknown layer/component class.
+
+        Example:
+            >>> import aether as ae
+            ... model = ae.Model.load("saved_models/cifar10_3block_cnn.aether")
+            ... loss, acc = model.evaluate(X=X_test, y=y_test)
         """
         if safetensors is None:
             raise ImportError(
@@ -629,21 +710,39 @@ class Model():
                 "Install it with `pip install safetensors`."
             )
 
+        path = Path(filepath)
+        if not path.exists():
+            raise FileNotFoundError(f"[aether] Archive '{path}' does not exist.")
+
         active_backend = "cupy" if getattr(config.xp, "__name__", "") == "cupy" else "numpy"
         target_device = device if device is not None else active_backend
 
-        with zipfile.ZipFile(filepath, "r") as zipf:
+        with zipfile.ZipFile(path, "r") as zipf:
             arch_bytes = zipf.read("architecture.json")
             weights_bytes = zipf.read("weights.safetensors")
 
         manifest = json.loads(arch_bytes.decode("utf-8"))
         raw_weights = safetensors.numpy.load(weights_bytes)
 
+        # Forward-compatibility gate: a bumped major means unreadable semantics,
+        # not merely unrecognized keys.
+        schema_version = str(manifest.get("schema_version", "1.0"))
+        try:
+            schema_major = int(schema_version.split(".", 1)[0])
+        except ValueError:
+            schema_major = 1
+        if schema_major > 1:
+            raise ValueError(
+                f"[aether] Archive '{path.name}' uses manifest schema v{schema_version}, "
+                f"which requires a newer version of aether."
+            )
+
         model = cls()
 
         if manifest.get("seed") is not None:
             model.manual_seed(manifest["seed"])
 
+        # 1. Reconstruct Layers (Inline, tuple-sanitized, subclass-checked)
         for layer_entry in manifest.get("layers", []):
             class_name = layer_entry["class_name"]
             cfg = layer_entry.get("config", {})
@@ -653,20 +752,29 @@ class Model():
                 for k, v in cfg.items()
             }
 
-            # Resolved on demand via layer_module.__getattr__
             layer_cls = getattr(layer_module, class_name, None)
             if layer_cls is None:
-                raise ValueError(
-                    f"[aether] Unknown layer class '{class_name}' found in saved manifest."
-                )
+                raise ValueError(f"[aether] Unknown layer class '{class_name}' found in saved manifest.")
+            if layer_cls is Layer or not (isinstance(layer_cls, type) and issubclass(layer_cls, Layer)):
+                raise TypeError(f"[aether] Manifest entry '{class_name}' is not a valid concrete 'Layer' subclass.")
 
             model.add(layer_cls(**sanitized_cfg))
 
+        # 2. Reconstruct Training Components (Via table-driven helper)
+        compile_cfg = manifest.get("compile") or {}
+        components = {
+            kind: _resolve_component(compile_cfg.get(kind), kind)
+            for kind in ("loss", "optimizer", "accuracy")
+        }
+
+        if any(component is not None for component in components.values()):
+            model.configure(**components)
         model.to(target_device)
 
         input_shape = tuple(manifest["input_shape"])
         model.finalize(input_shape=input_shape)
 
+        # 3. Load & Map Weights
         layer_param_map: dict[int, dict] = {}
         for flat_key, array in raw_weights.items():
             if "." not in flat_key:

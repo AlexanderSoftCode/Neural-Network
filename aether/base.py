@@ -25,7 +25,7 @@ class Layer:
         return self.output_shape
     
     def get_config(self) -> dict:
-        """Override to return constructor kwargs required to reconstruct the layer."""
+        """Override to return constructor kwargs required to reconstruct the layer. Used by Model.load()"""
         return {}
 
     def _resolve_compute_dtype(self, xp):

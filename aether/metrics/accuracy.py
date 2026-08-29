@@ -23,10 +23,15 @@ class Accuracy:
     
     def predict(self, X, *, batch_size = None):
         prediction_steps = 1
+
+    def get_config(self) -> dict:
+        """Override to return constructor kwargs required to reconstruct the metric.
+        Used by Model.save() / Model.load()."""
+        return {}
 class RegressionAccuracy(Accuracy):
 
-    def __init__(self):
-        self.precision = None
+    def __init__(self, precision=None):
+        self.precision = precision
     
     #Now we are getting the precision value
     def init(self, y, reinit = False):
@@ -38,6 +43,10 @@ class RegressionAccuracy(Accuracy):
         xp = config.get_array_module(predictions)
         return xp.absolute(predictions - y) < self.precision
 
+    def get_config(self) -> dict:
+        return {
+            "precision": float(self.precision) if self.precision is not None else None,
+        }
 class CategoricalAccuracy(Accuracy):
     def init(self, y):
         pass
