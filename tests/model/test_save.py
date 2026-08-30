@@ -106,7 +106,7 @@ class TestModelSaveBase(base_case.AetherBaseTestCase):
                 zipf.read("architecture.json").decode("utf-8")
             )
 
-        self.assertEqual(manifest["schema_version"], "1.0")
+        self.assertEqual(manifest["schema_version"], "1.1")
         self.assertEqual(manifest["input_shape"], [self.NUM_FEATURES])
         self.assertEqual(manifest["seed"], 42)
         self.assertEqual(manifest["precision_policy"], "float32")

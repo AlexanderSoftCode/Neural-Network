@@ -3,7 +3,7 @@ import numpy as np
 import aether.config as config
 import tests.base_case as base_case
 
-from aether.preprocessing.transforms import Compose, ToTensor, StandardScaler, Rescale
+from aether.preprocessing.transforms import Compose, Preprocess, ToTensor, StandardScaler, Rescale
 
 
 class TestComposePipelineTransform(base_case.AetherBaseTestCase):
@@ -83,15 +83,17 @@ class TestComposePipelineTransform(base_case.AetherBaseTestCase):
         """Verify that Compose executes transforms sequentially in exact list order."""
         execution_order = []
 
-        def step_one(x):
-            execution_order.append(1)
-            return x + 10
+        class StepOne(Preprocess):
+            def transform(self, x):
+                execution_order.append(1)
+                return x + 10
 
-        def step_two(x):
-            execution_order.append(2)
-            return x * 2
+        class StepTwo(Preprocess):
+            def transform(self, x):
+                execution_order.append(2)
+                return x * 2
 
-        pipeline = Compose(transforms=[step_one, step_two])
+        pipeline = Compose(transforms=[StepOne(), StepTwo()])
         result = pipeline(5)
 
         self.assertEqual(execution_order, [1, 2])
@@ -102,12 +104,13 @@ class TestComposePipelineTransform(base_case.AetherBaseTestCase):
         X_raw = np.ones((10, 4), dtype=np.float64)
         y_raw = np.zeros((10,), dtype=np.int64)
 
-        def double_both(X, y):
-            return X * 2, y + 1
+        class DoubleBoth(Preprocess):
+            def transform(self, X, y):
+                return X * 2, y + 1
 
         pipeline = Compose(transforms=[
             ToTensor(dtype='float32', preserve_integers=True, target_device=self.backend_name),
-            double_both
+            DoubleBoth()
         ])
 
         X_out, y_out = pipeline(X_raw, y_raw)
@@ -188,6 +191,86 @@ class TestComposePipelineTransform(base_case.AetherBaseTestCase):
         self.assertAlmostEqual(float(X_out[0, 1]), 1.0, places=5)
         self.assertTrue(self.xp.issubdtype(y_out.dtype, self.xp.integer))
         self.assertEqual(int(y_out[1]), 1)
+
+
+    # ---- Contract, construction and nesting ----
+
+    def test_compose_is_a_preprocess(self):
+        """Compose is dispatched like any other transform, so it must be one."""
+        self.assertIsInstance(Compose(transforms=[]), Preprocess)
+
+    def test_compose_transform_and_call_agree(self):
+        X = self.xp.array([1.0, 2.0, 3.0], dtype=self.xp.float32)
+        pipeline = Compose(transforms=[Rescale(factor=2.0)])
+        self.assertTrue(self.xp.allclose(pipeline.transform(X), pipeline(X)))
+
+    def test_compose_rejects_non_preprocess_member_naming_index(self):
+        """Members are dispatched unguarded, so the rejection has to name the slot."""
+        with self.assertRaises(TypeError) as ctx:
+            Compose(transforms=[ToTensor(), object(), Rescale()])
+
+        message = str(ctx.exception)
+        self.assertIn("transforms[1]", message)
+        self.assertIn("object", message)
+
+    def test_compose_rejects_bare_callable_member(self):
+        # Callable is not enough: _compile_for_device/_apply_precision/get_config
+        # are all dispatched on members without a hasattr guard.
+        with self.assertRaises(TypeError):
+            Compose(transforms=[lambda X: X])
+
+    def test_nested_compose_executes_in_flattened_order(self):
+        order = []
+
+        class Step(Preprocess):
+            def __init__(self, tag):
+                self.tag = tag
+
+            def transform(self, X):
+                order.append(self.tag)
+                return X
+
+        pipeline = Compose(transforms=[
+            Step("a"),
+            Compose(transforms=[Step("b"), Step("c")]),
+            Step("d"),
+        ])
+        pipeline(self.xp.zeros((2, 2), dtype=self.xp.float32))
+
+        self.assertEqual(order, ["a", "b", "c", "d"])
+
+    def test_nested_compose_transforms_values_in_order(self):
+        pipeline = Compose(transforms=[
+            Rescale(factor=2.0),
+            Compose(transforms=[Rescale(factor=3.0)]),
+        ])
+        X = self.xp.array([1.0], dtype=self.xp.float32)
+        self.assertAlmostEqual(float(pipeline(X)[0]), 6.0, places=5)
+
+    # ---- is_fitted aggregation ----
+
+    def test_is_fitted_aggregates_members(self):
+        scaler = StandardScaler()
+        pipeline = Compose(transforms=[
+            ToTensor(dtype="float32", target_device=self.backend_name),
+            scaler,
+        ])
+        self.assertFalse(pipeline.is_fitted)
+
+        scaler.fit(self.xp.ones((4, 3), dtype=self.xp.float32))
+        self.assertTrue(pipeline.is_fitted)
+
+    def test_is_fitted_true_for_stateless_and_empty_pipelines(self):
+        self.assertTrue(Compose(transforms=[]).is_fitted)
+        self.assertTrue(Compose(transforms=[ToTensor(), Rescale()]).is_fitted)
+
+    def test_is_fitted_aggregates_through_nesting(self):
+        scaler = StandardScaler()
+        pipeline = Compose(transforms=[Compose(transforms=[scaler])])
+        self.assertFalse(pipeline.is_fitted)
+
+        scaler.fit(self.xp.ones((4, 3), dtype=self.xp.float32))
+        self.assertTrue(pipeline.is_fitted)
 
 
 base_case.register_test_suites(globals(), TestComposePipelineTransform)

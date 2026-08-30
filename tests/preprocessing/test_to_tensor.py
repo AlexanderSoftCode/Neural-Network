@@ -1,3 +1,6 @@
+import json
+import warnings
+
 import numpy as np
 
 import aether.config as config
@@ -15,9 +18,7 @@ from aether.preprocessing._utils import (
 
 class TestToTensorTransform(base_case.AetherBaseTestCase):
 
-    # =========================================================================
-    # 1. Helper Function Tests (_utils.py)
-    # =========================================================================
+    # ---- Helper Function Tests (_utils.py) ----------------------
 
     def test_validate_dtype_valid_and_invalid(self):
         """Verify valid floating dtypes pass and invalid dtypes raise ValueError."""
@@ -50,24 +51,19 @@ class TestToTensorTransform(base_case.AetherBaseTestCase):
         """Verify argument decomposition for trailing positional dtypes."""
         arr = [1.0, 2.0, 3.0]
         
-        # Positionally trailing dtype extraction
         parsed_args, dt = parse_inputs((arr, 'float32'), kw_dtype=None)
         self.assertEqual(len(parsed_args), 1)
         self.assertEqual(dt, 'float32')
 
-        # Keyword override priority
         parsed_args, dt = parse_inputs((arr,), kw_dtype='float16')
         self.assertEqual(dt, 'float16')
 
     def test_resolve_dtypes(self):
         """Verify dtype broadcasting and 1:1 positional mapping."""
-        # Single dtype broadcasted across multiple arrays
         self.assertEqual(resolve_dtypes('float32', 2), ['float32', 'float32'])
         
-        # Sequence mapping
         self.assertEqual(resolve_dtypes(('float32', 'float16'), 2), ['float32', 'float16'])
 
-        # Length mismatch error
         with self.assertRaises(ValueError):
             resolve_dtypes(('float32', 'float16'), 3)
 
@@ -81,15 +77,12 @@ class TestToTensorTransform(base_case.AetherBaseTestCase):
         )
         self.assertTrue(self.xp.issubdtype(res_kept.dtype, self.xp.integer))
 
-        # Updated behavior: When target_dtype IS explicitly provided, convert integer to target_dtype!
         res_casted = convert_single_tensor(
             arr, target_dtype='float32', target_device=self.backend_name, preserve_integers=True
         )
         self.assertEqual(str(res_casted.dtype), 'float32')
 
-    # =========================================================================
-    # 2. Functional API Tests (to_tensor)
-    # =========================================================================
+    # ---- Functional API Tests (to_tensor) -----------------------------
 
     def test_to_tensor_single_array_conversion(self):
         """Verify single array conversion to target device and precision."""
@@ -117,9 +110,7 @@ class TestToTensorTransform(base_case.AetherBaseTestCase):
         self.assertIsInstance(y_res, self.xp.ndarray)
         self.assertTrue(self.xp.issubdtype(y_res.dtype, self.xp.integer))
 
-    # =========================================================================
-    # 3. Class Pipeline Wrapper Tests (ToTensor)
-    # =========================================================================
+    # ---- Class Pipeline Wrapper Tests (ToTensor) --------------
 
     def test_totensor_class_instance(self):
         """Verify ToTensor instance correctly delegates config arguments via __call__."""
@@ -134,6 +125,53 @@ class TestToTensorTransform(base_case.AetherBaseTestCase):
 
         self.assertIsInstance(tensor_data, self.xp.ndarray)
         self.assertEqual(str(tensor_data.dtype), 'float32')
+
+    # ---- Model Dispatch Hook Tests (_compile_for_device / _apply_precision) ----
+
+    def test_compile_for_device_overrides_explicit_target_device(self):
+        """Model.to() owns the device target, so it wins over a user-set value."""
+        transform = ToTensor(target_device="numpy")
+        transform._compile_for_device(self.backend_name)
+        self.assertEqual(transform.target_device, self.backend_name)
+
+    def test_compile_for_device_fills_unset_target_device(self):
+        transform = ToTensor()
+        transform._compile_for_device(self.backend_name)
+        self.assertEqual(transform.target_device, self.backend_name)
+
+    def test_apply_precision_fills_unset_dtype(self):
+        transform = ToTensor()
+        transform._apply_precision(config.DTypePolicy(compute_dtype="float32"))
+        self.assertEqual(transform.dtype, "float32")
+
+    def test_apply_precision_leaves_explicit_dtype_pinned(self):
+        """An explicitly constructed dtype is the user's pin and outranks the policy."""
+        transform = ToTensor(dtype="float32")
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore", message=r".*NumPy float16 is emulated.*", category=UserWarning
+            )
+            transform._apply_precision(config.DTypePolicy(compute_dtype="float16"))
+
+        self.assertEqual(transform.dtype, "float32")
+
+    def test_apply_precision_noop_when_policy_has_no_compute_dtype(self):
+        transform = ToTensor()
+        transform._apply_precision(config.DTypePolicy(compute_dtype=None))
+        self.assertIsNone(transform.dtype)
+
+    def test_apply_precision_stores_a_json_safe_string(self):
+        transform = ToTensor()
+        transform._apply_precision(config.DTypePolicy(compute_dtype="float32"))
+        json.dumps(transform.get_config())
+
+    def test_get_config_stringifies_a_dtype_object(self):
+        cfg = ToTensor(dtype=np.float32, target_device="numpy").get_config()
+        self.assertEqual(
+            cfg,
+            {"dtype": "float32", "preserve_integers": True, "target_device": "numpy"},
+        )
 
 
 base_case.register_test_suites(globals(), TestToTensorTransform)

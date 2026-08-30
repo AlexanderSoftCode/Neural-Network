@@ -377,7 +377,7 @@ class TestModelLoadBase(base_case.AetherBaseTestCase):
         with self.assertRaises((TypeError, ValueError)):
             Model.load(corrupt_save_path)
 
-def test_loaded_model_evaluation_and_loss_parity(self):
+    def test_loaded_model_evaluation_and_loss_parity(self):
         """Verify model.evaluate() works out-of-the-box post-load and matches original output exactly."""
         orig_model = Model()
         orig_model.manual_seed(42)
@@ -404,8 +404,8 @@ def test_loaded_model_evaluation_and_loss_parity(self):
         X = config.to_device(raw_X, target=self.backend_name)
         y = config.to_device(raw_y, target=self.backend_name)
 
-        orig_loss, orig_acc = orig_model.evaluate(X=X, y=y, batch_size=10)
-        load_loss, load_acc = loaded_model.evaluate(X=X, y=y, batch_size=10)
+        orig_loss, orig_acc = orig_model.evaluate(X=X, y=y, batch_size=10, verbose=0)
+        load_loss, load_acc = loaded_model.evaluate(X=X, y=y, batch_size=10, verbose=0)
 
         # Confirm non-zero and exact equality
         self.assertGreater(load_loss, 0.0)

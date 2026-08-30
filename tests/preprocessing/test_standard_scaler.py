@@ -1,5 +1,5 @@
 import numpy as np
-
+import warnings
 import aether.config as config
 import tests.base_case as base_case
 
@@ -132,6 +132,236 @@ class TestStandardScalerTransform(base_case.AetherBaseTestCase):
         # Channel means across (batch, height, width) should be zero
         channel_means = self.xp.mean(out, axis=(0, 1, 2))
         self.assertTrue(self.xp.allclose(channel_means, self.xp.zeros((3,), dtype=self.xp.float32), atol=1e-5))
+        
+    def test_is_fitted_false_before_fit(self):
+        self.assertFalse(self.make_component(StandardScaler).is_fitted)
+ 
+    def test_is_fitted_true_after_fit(self):
+        X = self.xp.arange(24, dtype=self.xp.float32).reshape(4, 6)
+        scaler = self.make_component(StandardScaler).fit(X)
+        self.assertTrue(scaler.is_fitted)
+ 
+    def test_transform_before_fit_raises(self):
+        X = self.xp.ones((2, 2), dtype=self.xp.float32)
+        with self.assertRaises(ValueError):
+            self.make_component(StandardScaler).transform(X)
+ 
+    def test_fit_computes_correct_statistics(self):
+        X = self.xp.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]], dtype=self.xp.float32)
+        scaler = self.make_component(StandardScaler, axis=0).fit(X)
+        self.assertTrue(self.xp.allclose(scaler.mean, self.xp.mean(X, axis=0, keepdims=True)))
+        self.assertTrue(self.xp.allclose(scaler.std, self.xp.std(X, axis=0, keepdims=True)))
+ 
+    def test_transform_matches_manual_standardization(self):
+        X = self.xp.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]], dtype=self.xp.float32)
+        scaler = self.make_component(StandardScaler, axis=0).fit(X)
+        out = scaler.transform(X)
+        expected = (X - scaler.mean) / (scaler.std + 1e-8)
+        self.assertTrue(self.xp.allclose(out, expected))
+ 
+    def test_transform_casts_integer_input_to_float32(self):
+        X = (self.xp.arange(24) % 10).astype(self.xp.uint8).reshape(4, 6)
+        scaler = self.make_component(StandardScaler, axis=0).fit(X)
+        self.assertEqual(scaler.dtype, np.float32)
+        self.assertEqual(scaler.transform(X).dtype, np.float32)
+ 
+    def test_constructor_coerces_list_mean_std(self):
+        scaler = StandardScaler(mean=[0.0, 0.0], std=[1.0, 1.0])
+        self.assertTrue(scaler.is_fitted)
+        self.assertTrue(hasattr(scaler.mean, "dtype"))
+        self.assertTrue(hasattr(scaler.std, "dtype"))
+ 
+    def test_constructor_leaves_live_array_untouched(self):
+        mean = self.xp.array([0.0, 0.0], dtype=self.xp.float32)
+        scaler = StandardScaler(mean=mean, std=self.xp.array([1.0, 1.0], dtype=self.xp.float32))
+        self.assertIs(scaler.mean, mean)
+ 
+    def test_get_config_roundtrip(self):
+        X = self.xp.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]], dtype=self.xp.float32)
+        scaler = self.make_component(StandardScaler, axis=0).fit(X)
+        cfg = scaler.get_config()
+ 
+        # from_config, not StandardScaler(**cfg): the config carries the dtype-pin
+        # flag, which is derived state rather than a constructor argument.
+        restored = StandardScaler.from_config(cfg)
+        self.assertTrue(restored.is_fitted)
+        self.assertEqual(restored.dtype, scaler.dtype)
+        self.assertTrue(self.xp.allclose(restored.transform(X), scaler.transform(X)))
+ 
+    def test_get_config_before_fit_is_null(self):
+        cfg = self.make_component(StandardScaler).get_config()
+        self.assertIsNone(cfg["mean"])
+        self.assertIsNone(cfg["std"])
+ 
+    def test_get_config_axis_tuple_becomes_list(self):
+        X = self.xp.zeros((2, 3, 3, 4), dtype=self.xp.float32)
+        cfg = self.make_component(StandardScaler, axis=(0, 1, 2)).fit(X).get_config()
+        self.assertEqual(cfg["axis"], [0, 1, 2])
+ 
+    def test_compile_for_device_noop_when_unfit(self):
+        # make_component constructs then immediately calls _compile_for_device --
+        # must not crash on mean/std still being None.
+        scaler = self.make_component(StandardScaler, axis=0)
+        self.assertFalse(scaler.is_fitted)
+ 
+    def test_compile_for_device_migrates_fitted_stats(self):
+        X = self.xp.array([[1.0, 2.0], [3.0, 4.0]], dtype=self.xp.float32)
+        scaler = self.make_component(StandardScaler, axis=0).fit(X)
+        before = self.xp.asarray(scaler.mean).copy()
+ 
+        scaler._compile_for_device(self.backend_name)
+ 
+        self.assertTrue(self.xp.allclose(scaler.mean, before))
+ 
+    def test_apply_precision_overrides_dtype(self):
+        X = self.xp.array([[1, 2, 3], [4, 5, 6]], dtype=self.xp.uint8)
+        scaler = self.make_component(StandardScaler, axis=0).fit(X)
+        self.assertEqual(scaler.dtype, np.float32)
+ 
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=r".*NumPy float16 is emulated.*",
+                category=UserWarning,
+            )
+            policy = config.DTypePolicy(compute_dtype="float16")
+            scaler._apply_precision(policy)
+ 
+        self.assertEqual(scaler.dtype, np.dtype("float16"))
+ 
+    def test_apply_precision_noop_when_policy_has_no_compute_dtype(self):
+        X = self.xp.array([[1, 2, 3], [4, 5, 6]], dtype=self.xp.uint8)
+        scaler = self.make_component(StandardScaler, axis=0).fit(X)
+        self.assertEqual(scaler.dtype, np.float32)
+ 
+        scaler._apply_precision(config.DTypePolicy(compute_dtype=None))
+ 
+        self.assertEqual(scaler.dtype, np.float32)
+
+
+    # ---- dtype ladder: constructor pin > precision policy > fit inference ----
+
+    def test_constructor_pin_outranks_precision_policy(self):
+        scaler = StandardScaler(dtype="float32")
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore", message=r".*NumPy float16 is emulated.*", category=UserWarning
+            )
+            scaler._apply_precision(config.DTypePolicy(compute_dtype="float16"))
+
+        self.assertEqual(scaler.dtype, np.dtype("float32"))
+
+    def test_constructor_pin_survives_fit(self):
+        """fit() may only infer -- it must never overwrite a pin."""
+        scaler = StandardScaler(dtype="float32")
+        scaler.fit(self.xp.ones((4, 3), dtype=self.xp.float64))
+
+        self.assertEqual(scaler.dtype, np.dtype("float32"))
+        self.assertEqual(scaler.mean.dtype, np.dtype("float32"))
+        self.assertEqual(scaler.std.dtype, np.dtype("float32"))
+
+    def test_precision_policy_outranks_fit_inference(self):
+        # _apply_precision remains the documented hook: the exemption only stops
+        # the model from dispatching, a direct call still applies.
+        scaler = StandardScaler()
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore", message=r".*NumPy float16 is emulated.*", category=UserWarning
+            )
+            scaler._apply_precision(config.DTypePolicy(compute_dtype="float16"))
+
+        scaler.fit(self.xp.ones((4, 3), dtype=self.xp.float64))
+        self.assertEqual(scaler.dtype, np.dtype("float16"))
+
+    def test_fit_inference_applies_when_nothing_is_pinned(self):
+        scaler = StandardScaler()
+        scaler.fit(self.xp.ones((4, 3), dtype=self.xp.float64))
+        self.assertEqual(np.dtype(scaler.dtype), np.dtype("float64"))
+
+    def test_apply_precision_after_fit_recasts_statistics(self):
+        scaler = StandardScaler(axis=0).fit(
+            self.xp.arange(12, dtype=self.xp.float32).reshape(4, 3)
+        )
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore", message=r".*NumPy float16 is emulated.*", category=UserWarning
+            )
+            scaler._apply_precision(config.DTypePolicy(compute_dtype="float16"))
+
+        self.assertEqual(scaler.mean.dtype, np.dtype("float16"))
+        self.assertEqual(scaler.std.dtype, np.dtype("float16"))
+
+    def test_fit_accumulates_wider_than_a_float16_pin(self):
+        """Stats are stored at the pinned width but reduced at >= float32."""
+        scaler = StandardScaler(dtype="float16")
+        scaler.fit(self.xp.ones((4, 3), dtype=self.xp.float32))
+
+        self.assertEqual(scaler.mean.dtype, np.dtype("float16"))
+        self.assertTrue(bool(self.xp.all(self.xp.isfinite(scaler.std))))
+
+    # ---- dtype traps on the round-trip ----
+
+    def test_restored_statistics_are_float32_not_float64(self):
+        """get_config emits nested lists; a bare np.asarray would return float64."""
+        X = self.xp.arange(12, dtype=self.xp.float32).reshape(4, 3)
+        restored = StandardScaler.from_config(
+            StandardScaler(axis=0).fit(X).get_config()
+        )
+
+        self.assertEqual(restored.mean.dtype, np.dtype("float32"))
+        self.assertEqual(restored.std.dtype, np.dtype("float32"))
+
+    def test_list_statistics_without_a_dtype_coerce_to_float32(self):
+        scaler = StandardScaler(mean=[0.0], std=[1.0])
+        self.assertEqual(scaler.mean.dtype, np.dtype("float32"))
+        self.assertEqual(scaler.std.dtype, np.dtype("float32"))
+
+    def test_transform_with_dtype_none_does_not_promote_to_float64(self):
+        """astype(None) silently yields float64, so the cast stays guarded."""
+        scaler = StandardScaler(mean=[0.0], std=[1.0])
+        self.assertIsNone(scaler.dtype)
+
+        X = self.xp.ones((4, 1), dtype=self.xp.float32)
+        self.assertEqual(scaler.transform(X).dtype, np.dtype("float32"))
+
+    # ---- axis coercion ----
+
+    def test_list_axis_is_coerced_to_tuple(self):
+        # A list axis would be forwarded straight into xp.mean/std, which only
+        # accepts int or tuple.
+        self.assertEqual(StandardScaler(axis=[0, 1, 2]).axis, (0, 1, 2))
+
+    def test_list_axis_fits_a_four_dimensional_batch(self):
+        scaler = StandardScaler(axis=[0, 1, 2])
+        scaler.fit(self.xp.zeros((2, 3, 3, 4), dtype=self.xp.float32))
+        self.assertEqual(scaler.mean.shape, (1, 1, 1, 4))
+
+    def test_axis_round_trips_through_config_as_a_tuple(self):
+        restored = StandardScaler.from_config(
+            StandardScaler(axis=(0, 1, 2)).get_config()
+        )
+        self.assertEqual(restored.axis, (0, 1, 2))
+
+    # ---- dtype pin serialization ----
+
+    def test_dtype_pin_survives_a_config_round_trip(self):
+        restored = StandardScaler.from_config(
+            StandardScaler(dtype="float32").get_config()
+        )
+        self.assertTrue(restored._dtype_pinned)
+
+    def test_inferred_dtype_does_not_come_back_pinned(self):
+        """A dtype fit() merely inferred must stay overridable after a reload."""
+        scaler = StandardScaler(axis=0).fit(
+            self.xp.ones((4, 3), dtype=self.xp.float32)
+        )
+        restored = StandardScaler.from_config(scaler.get_config())
+
+        self.assertFalse(restored._dtype_pinned)
+        self.assertEqual(restored.dtype, np.dtype("float32"))
 
 
 base_case.register_test_suites(globals(), TestStandardScalerTransform)
