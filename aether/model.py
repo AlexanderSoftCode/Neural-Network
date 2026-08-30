@@ -1,5 +1,7 @@
 import json
+import warnings
 import zipfile
+from functools import partial
 from pathlib import Path
 import numpy as np
 
@@ -8,15 +10,25 @@ import aether.layers as layer_module
 import aether.losses as loss_module
 import aether.metrics as metric_module
 import aether.optimizers as optimizer_module
+import aether.preprocessing as transforms_module
 
 from aether.base import Layer
-from aether._utils import NullAccuracy, NullOptimizer
+from aether._utils import NullAccuracy, NullOptimizer, NullPreprocessor
 from aether._utils.progress import make_progress
 try:
     import safetensors.numpy
 except ImportError:
     safetensors = None
 
+# Manifest schema. A major bump means semantics an older reader cannot honour
+# and is a hard error on load; a minor bump means additive keys an older reader
+# simply ignores, so it only warns.
+_SCHEMA_MAJOR = 1
+_SCHEMA_MINOR = 1
+_SCHEMA_VERSION = f"{_SCHEMA_MAJOR}.{_SCHEMA_MINOR}"
+
+# Preprocessors are absent: their configs nest further {class_name, config}
+# entries, so they resolve through aether.preprocessing.deserialize instead.
 _COMPONENT_NAMESPACES = {
     "loss": (loss_module, loss_module.Loss),
     "optimizer": (optimizer_module, optimizer_module.Optimizer),
@@ -24,7 +36,7 @@ _COMPONENT_NAMESPACES = {
 }
 
 def _serialize_component(obj):
-    if obj is None or isinstance(obj, (NullOptimizer, NullAccuracy)):
+    if obj is None or isinstance(obj, (NullOptimizer, NullAccuracy, NullPreprocessor)):
         return None
     return {
         "class_name": type(obj).__name__,
@@ -72,6 +84,7 @@ class Model():
         self.loss = None
         self.optimizer = None
         self.accuracy = None
+        self.preprocessor = None
         self._seed = None
         self._predict_activation = None
 
@@ -92,14 +105,14 @@ class Model():
         self._seed = int(seed)
         return self
     
-    def configure(self, loss=None, optimizer=None, accuracy=None):
-        """Configures the training components (loss, optimizer, metrics) for the model.
-        Utilizes strict type checking for loss, optimizer, and accuracy. 
+    def configure(self, loss=None, optimizer=None, accuracy=None, preprocessor=None):
+        """Configures the training components (loss, optimizer, metrics, preprocessor) for the model.
+        Utilizes strict type checking for loss, optimizer, accuracy, and preprocessor.
         """
-        if loss is None and optimizer is None and accuracy is None:
+        if loss is None and optimizer is None and accuracy is None and preprocessor is None:
             raise ValueError(
-                "At least one component (loss, optimizer, or metrics) must be"
-                " provided to configure()."
+                "At least one component (loss, optimizer, metrics, or preprocessor)"
+                " must be provided to configure()."
             )
 
         if loss is not None:
@@ -128,6 +141,15 @@ class Model():
                 )
             self.accuracy = accuracy
 
+        if preprocessor is not None:
+            if not isinstance(preprocessor, transforms_module.Preprocess):
+                raise TypeError(
+                    f"Expected an instance of 'Preprocess', but got '{type(preprocessor).__name__}'. "
+                    "Make sure the preprocessor you are passing in inherits from "
+                    "aether.preprocessing.Preprocess."
+                )
+            self.preprocessor = preprocessor
+
     def _sync_device(self, target_device=None):
         """Internal dispatch to compile all registered components into active backend."""
         dev = target_device or getattr(self, "device", None)
@@ -140,6 +162,7 @@ class Model():
             getattr(self, "loss", None),
             getattr(self, "optimizer", None),
             getattr(self, "accuracy", None),
+            getattr(self, "preprocessor", None),
         ]
 
         for comp in components:
@@ -195,7 +218,10 @@ class Model():
         """
         Sets the target floating-point precision policy on the model and
         dispatches it to all registered layers, skipping any layer marked with
-        the `_precision_exempt` attribute.
+        the `_precision_exempt` attribute, then to the attached preprocessor,
+        which is skipped under the same flag. Normalization components -- the
+        normalization layers and `StandardScaler` -- set it, so their statistics
+        keep accumulating in single precision.
 
         Args:
             compute_dtype (str): The target floating point precision, 
@@ -206,16 +232,18 @@ class Model():
             RuntimeError: If `compute_dtype` is not supported in NumPy
         Note:
             Method can be called before or after both Model.to and Model.finalize, but must 
-            be called before training and inference. Layers makred with '_precision_exempt=True'
-            (e.g.) normalization or softmax layers retain single-precision compute to 
-            prevent numerical instabilility. Optimizer and Loss classes will also always 
-            perform single precision calculations. 
+            be called before training and inference. 
         """
         self.precision_policy = config.DTypePolicy(compute_dtype)
         for layer in self.layers:
             if (hasattr(layer, "_apply_precision")
                  and not getattr(layer, "_precision_exempt", False)):
                 layer._apply_precision(self.precision_policy)
+
+        if self.preprocessor is not None and not getattr(
+            self.preprocessor, "_precision_exempt", False
+        ):
+            self.preprocessor._apply_precision(self.precision_policy)
 
     def finalize(self, input_shape: tuple[int, ...]):
         """
@@ -270,8 +298,69 @@ class Model():
 
         if self.accuracy is None:
             self.accuracy = NullAccuracy()
+
+        if self.preprocessor is None:
+            self.preprocessor = NullPreprocessor()
+
+        precision_policy = getattr(self, "precision_policy", None)
+        if precision_policy is not None and not getattr(
+            self.preprocessor, "_precision_exempt", False
+        ):
+            self.preprocessor._apply_precision(precision_policy)
+
         self._sync_device()
         self.is_finalized = True
+
+    def _has_pipeline(self):
+        return self.preprocessor is not None and not isinstance(self.preprocessor, NullPreprocessor)
+
+    def _assert_pipeline_device(self, X):
+        """Probe the attached pipeline once and confirm it emits on the model's device.
+
+        Transforms a single-sample slice rather than the full array: the pipeline
+        owns X's placement, so this is the only chance to catch a misconfigured
+        pipeline before a device mismatch surfaces from inside a layer's matmul as
+        an unattributable kernel error.
+
+        Args:
+            X (ndarray): The raw input array whose first sample is used as the probe.
+        Raises:
+            TypeError: If the pipeline's output does not live on the model's device.
+        """
+        expected_backend = getattr(self, "device", "numpy")
+        probe = self.preprocessor.transform(X[:1])
+        actual_backend = "cupy" if type(probe).__module__.startswith("cupy") else "numpy"
+
+        if actual_backend != expected_backend:
+            raise TypeError(
+                f"[aether] Preprocessing pipeline device mismatch: model is configured for "
+                f"the '{expected_backend}' backend, but the attached "
+                f"'{type(self.preprocessor).__name__}' produced a '{type(probe).__name__}' "
+                f"on '{actual_backend}'. Add an aether.ToTensor(...) transform to the pipeline "
+                f"(model.to() retargets it automatically), or migrate the model via "
+                f"model.to('{actual_backend}')."
+            )
+
+    def _make_target_preparer(self, y):
+        """AOT-select the per-batch label migration callable.
+
+        Slicing preserves an array's module, so whether `y` needs to move is fully
+        knowable before the loop. Labels are migrated per batch rather than once
+        up front so that `train()`'s shuffled fancy-indexing keeps operating on `y`
+        in its original namespace, matching the index array drawn from `X`.
+
+        Args:
+            y (ndarray): The full target array passed to train()/evaluate().
+        Returns:
+            callable: Identity when `y` already matches the model's device,
+            otherwise a `config.to_device` partial bound to that device.
+        """
+        expected_backend = getattr(self, "device", "numpy")
+        is_y_cupy = type(y).__module__.startswith("cupy")
+
+        if (expected_backend == "cupy") == is_y_cupy:
+            return lambda batch_y: batch_y
+        return partial(config.to_device, target=expected_backend)
 
     def _assert_device_alignment(self, X, y=None):
         """Ensure incoming input tensors strictly match the configured hardware backend."""
@@ -323,7 +412,8 @@ class Model():
         shuffle=True,
         print_every=1,
         verbose = 1,
-        validation_data=None
+        validation_data=None,
+        fit_preprocessor: bool | None = None
     ):
         """
         Train the compiled neural network on dataset (X, y).
@@ -331,25 +421,34 @@ class Model():
         AOT scheduling to avoid python conditionals inside the main batch loops, minimizing 
         CPU overhead
 
+        If a preprocessing pipeline is attached "X" can be passed as raw data. Without a pipeline,
+        'X' and 'y' must already match model's device.
+
         Args:
-            X (ndarray): Input features (NumPy or CuPy ndarray).
+            X (ndarray): Input features (NumPy or CuPy ndarray). Raw/un-preprocessed
+                when a preprocessing pipeline is attached.
             y (ndarray): Target labels or one-hot ground truths.
             epochs (int): Number of full passes over the dataset.
             batch_size (int, optional): Mini-batch sample size. Defaults to None (full-batch).
-            shuffle (bool, optional): If True (default), draws a fresh sample-index
-                permutation every epoch on the active device backend and gathers
-                mini-batches from it via fancy indexing, so sample order differs
-                epoch to epoch without ever copying or reordering the full X/y
-                arrays. If False, mini-batches are taken as contiguous, zero-copy
-                slices in dataset order every epoch. Never applied to
-                `validation_data` -- evaluation order doesn't affect the metric.
+            shuffle (bool, optional): Permutes sample indices each epoch without copying[cite: 1].
+                Defaults to True
             print_every (int): Step interval frequency for logging telemetry.
             verbose (int, optional): Verbosity mode for training telemetry.
                 - `0`: Silent mode (no output printed).
                 - `1`: Dynamic graphical progress bar with metrics (default).
                 - `2`: Plain text summary per epoch without carriage returns/ANSI escapes.
-            Defaults to 1. 
-            validation_data (tuple, optional): (X_val, y_val) tuple for out-of-sample testing.
+            validation_data (tuple, optional): Raw (X_val, y_val) tupleevaluated per epoch
+            fit_preprocessor (bool, optional): Whether to fit the preprocessor (None=if uniftted, 
+                True=always), False=never)
+        Raises:
+            RuntimeError: If the model has not been finalized, or no loss is configured.
+            TypeError: With no pipeline attached, if `X`/`y` (or `validation_data`) do
+                not match the model's device backend. With a pipeline attached, if the
+                pipeline emits arrays on a device other than the model's.
+        Note:
+            - Full-dataset preprocessor fitting temporarily materializes data in memory.
+            - Do not pass manually pre-transformed data if a pipeline is attached to avoid
+              duplicate transformations.
         """
         if not self.is_finalized:
             raise RuntimeError(
@@ -361,9 +460,21 @@ class Model():
                 "[aether] Cannot train a model without a loss function."
                 "Pass in a valid loss function to model.configure(loss=...) before finalize & train"
             )
-        self._assert_device_alignment(X, y)
-        if validation_data is not None:
-            self._assert_device_alignment(validation_data[0], validation_data[1])
+
+        has_pipeline = self._has_pipeline()
+        if not has_pipeline:
+            self._assert_device_alignment(X, y)
+            if validation_data is not None:
+                self._assert_device_alignment(validation_data[0], validation_data[1])
+
+        should_fit = (
+            not self.preprocessor.is_fitted if fit_preprocessor is None else fit_preprocessor
+        )
+        if should_fit:
+            self.preprocessor.fit(X)
+
+        if has_pipeline:
+            self._assert_pipeline_device(X)
 
         xp = config.get_array_module(X)
 
@@ -383,6 +494,9 @@ class Model():
         else:
             def get_batch(epoch_indices, start_idx, end_idx):
                 return X[start_idx:end_idx], y[start_idx:end_idx]
+
+        prepare_input = self.preprocessor.transform
+        prepare_target = self._make_target_preparer(y)
 
         forward_fn = self.forward
         backward_fn = self.backward
@@ -434,7 +548,9 @@ class Model():
             for step, (start_idx, end_idx) in enumerate(batch_slices):
                 batch_X, batch_y = get_batch(epoch_indices, start_idx, end_idx)
 
-                data_loss, reg_loss, acc_val = run_step(batch_X, batch_y)
+                data_loss, reg_loss, acc_val = run_step(
+                    prepare_input(batch_X), prepare_target(batch_y)
+                )
 
                 # Bar-only tick: pure host-side math, zero GPU sync.
                 progress.tick(step + 1)
@@ -472,8 +588,13 @@ class Model():
         """
         Evaluate the model's loss and metrics on validation/test data in inference mode.
 
+        If a preprocessing pipeline is attached "X" can be passed as raw data; transforms
+        are applied per mini-batch, and 'y' is migrated automatically. Without a pipeline,
+        'X' and 'y' must already match model's device.
+
         Args:
             X (ndarray): Evaluation input features (NumPy or CuPy ndarray).
+                Raw/un-preprocessed when a preprocessing pipeline is attached.
             y (ndarray): Ground truth labels or targets.
             batch_size (int, optional): Mini-batch size. Defaults to None (full-batch).
             verbose (int | bool, optional): Verbosity mode for evaluation.
@@ -483,14 +604,29 @@ class Model():
         Returns:
             tuple: (val_loss, val_acc) representing the computed validation metrics.
         Raises:
-            RuntimeError: If model has not been explicitly finalized before calling evaluate().
+            RuntimeError: If model has not been explicitly finalized before calling
+                evaluate(), or if the attached preprocessing pipeline is unfitted.
+            TypeError: If input/pipeline devices do not match backend configuration.
+        Note:
+            Do not pass manually pre-transformed data if a pipeline is attached to avoid
+            duplicate transformations.
         """
         if not self.is_finalized:
             raise RuntimeError(
                 "[aether] Model must be explicitly finalized before evaluation. "
                 "Call model.finalize(input_shape) first."
             )
-        self._assert_device_alignment(X, y)
+        if not self.preprocessor.is_fitted:
+            raise RuntimeError(
+                "[aether] The attached preprocessing pipeline is not fitted, so evaluation "
+                "would run on untransformed data. Fit the pipeline before attaching it "
+                "(e.g. Compose([...]).fit(X_train)), or train the model first -- "
+                "model.train() fits an unfitted pipeline automatically."
+            )
+        if self._has_pipeline():
+            self._assert_pipeline_device(X)
+        else:
+            self._assert_device_alignment(X, y)
         num_samples = len(X)
         effective_batch_size = batch_size if batch_size is not None else num_samples
         eval_steps = (num_samples + effective_batch_size - 1) // effective_batch_size
@@ -508,14 +644,16 @@ class Model():
         forward_fn = self.forward
         loss = self.loss
         accuracy = self.accuracy
+        prepare_input = self.preprocessor.transform
+        prepare_target = self._make_target_preparer(y)
 
 
         for step in range(eval_steps):
             start_idx = step * effective_batch_size
             end_idx = min(start_idx + effective_batch_size, num_samples)
 
-            batch_X = X[start_idx:end_idx]
-            batch_y = y[start_idx:end_idx]
+            batch_X = prepare_input(X[start_idx:end_idx])
+            batch_y = prepare_target(y[start_idx:end_idx])
 
             # Forward propagation in evaluation mode
             output = forward_fn(batch_X, training=False)
@@ -543,8 +681,12 @@ class Model():
         Automatically routes raw outputs through any fused loss activation
         (e.g., SoftMax in SoftmaxCategoricalCrossEntropy) unless raw logits are requested.
 
+        When a preprocessing pipeline is attached, `X` may be raw and un-preprocessed:
+        Without the pipeline, `X` must already match the Model's target device.
+
         Args:
             X (ndarray): Input feature batch (NumPy or CuPy array).
+                Raw/un-preprocessed when a preprocessing pipeline is attached.
             batch_size (int, optional): Mini-batch sample size. Defaults to None (full-batch).
             return_logits (bool, optional): If True, returns raw network logits
                 even if an output activation was fused into the loss. Defaults to False.
@@ -556,36 +698,47 @@ class Model():
             ndarray: Model predictions (probabilities or stacked batch outputs).
 
         Raises:
-            RuntimeError: If model has not been explicitly finalized before calling predict().
+            RuntimeError: If model has not been explicitly finalized before calling
+                predict(), or if the attached preprocessing pipeline is unfitted.
+        Note:
+            Do not pass manually pre-transformed data if a pipeline is attached to avoid
+            duplicate transformations.
         """
         if not self.is_finalized:
             raise RuntimeError(
                 "[aether] Model must be explicitly finalized before prediction. "
                 "Call model.finalize(input_shape) first."
             )
+        if not self.preprocessor.is_fitted:
+            raise RuntimeError(
+                "[aether] The attached preprocessing pipeline is not fitted, so prediction "
+                "would run on untransformed data. Fit the pipeline before attaching it "
+                "(e.g. Compose([...]).fit(X_train)), or train the model first -- "
+                "model.train() fits an unfitted pipeline automatically."
+            )
 
-        xp = config.get_array_module(X)
         num_samples = len(X)
         effective_batch_size = batch_size if batch_size is not None else num_samples
         prediction_steps = (num_samples + effective_batch_size - 1) // effective_batch_size
 
         forward_fn = self.forward
+        prepare_input = self.preprocessor.transform
         activation = self._predict_activation
         apply_activation = (not return_logits) and (activation is not None)
 
-        output_module = np if stream_to_host else xp
         output_buffer = None
 
         for step in range(prediction_steps):
             start_idx = step * effective_batch_size
             end_idx = min(start_idx + effective_batch_size, num_samples)
 
-            batch_output = forward_fn(X[start_idx:end_idx], training=False)
+            batch_output = forward_fn(prepare_input(X[start_idx:end_idx]), training=False)
             if apply_activation:
                 act_out = activation.forward(batch_output, training=False)
                 batch_output = act_out if act_out is not None else activation.output
 
             if output_buffer is None:
+                output_module = np if stream_to_host else config.get_array_module(batch_output)
                 output_buffer = output_module.empty(
                     (num_samples,) + batch_output.shape[1:], dtype=batch_output.dtype
                 )
@@ -599,6 +752,12 @@ class Model():
     def save(self, filepath: str):
         """
         Saves the model architecture and parameters to a single .aether archive.
+
+        The manifest records the loss, optimizer, and accuracy metric under
+        "compile", and any attached preprocessing pipeline under a top-level
+        "preprocessor" key, so a loaded model can be fed raw, un-preprocessed
+        data straight away. A model with no pipeline attached writes a null
+        entry instead.
 
         Args:
             filepath (str): Path to output file (e.g. 'cifar10.aether').
@@ -637,7 +796,7 @@ class Model():
         )
 
         arch_manifest = {
-            "schema_version": "1.0",
+            "schema_version": _SCHEMA_VERSION,
             "input_shape": list(input_shape),
             "seed": self._seed,
             "precision_policy": precision_str,
@@ -646,6 +805,7 @@ class Model():
                 "optimizer": _serialize_component(self.optimizer),
                 "accuracy": _serialize_component(self.accuracy),
             },
+            "preprocessor": _serialize_component(self.preprocessor),
             "layers": [
                 {
                     "index": idx,
@@ -680,11 +840,6 @@ class Model():
         """Loads a model architecture, training components, and parameters from an
         .aether zip archive.
 
-        The returned model is fully configured and finalized: the loss, optimizer,
-        and accuracy metric recorded at save time are reconstructed and attached
-        before finalize(), so evaluate(), predict(), and train() are immediately
-        usable without a second configure() call.
-
         Args:
             filepath (str): Path to the saved .aether model file.
             device (str, optional): Target hardware device ('numpy' or 'cupy').
@@ -698,6 +853,11 @@ class Model():
             FileNotFoundError: If the archive does not exist.
             ValueError: If the manifest was written by a newer schema major version,
                 or references an unknown layer/component class.
+
+        Warns:
+            UserWarning: If the manifest carries a newer schema minor version.
+                Minor bumps are additive, so the archive still loads, but any key
+                this build does not recognize is ignored.
 
         Example:
             >>> import aether as ae
@@ -724,17 +884,30 @@ class Model():
         manifest = json.loads(arch_bytes.decode("utf-8"))
         raw_weights = safetensors.numpy.load(weights_bytes)
 
-        # Forward-compatibility gate: a bumped major means unreadable semantics,
-        # not merely unrecognized keys.
         schema_version = str(manifest.get("schema_version", "1.0"))
+        major_str, _, minor_str = schema_version.partition(".")
         try:
-            schema_major = int(schema_version.split(".", 1)[0])
+            schema_major = int(major_str)
         except ValueError:
-            schema_major = 1
-        if schema_major > 1:
+            schema_major = _SCHEMA_MAJOR
+        try:
+            schema_minor = int(minor_str.split(".", 1)[0])
+        except ValueError:
+            schema_minor = 0
+
+        if schema_major > _SCHEMA_MAJOR:
             raise ValueError(
                 f"[aether] Archive '{path.name}' uses manifest schema v{schema_version}, "
                 f"which requires a newer version of aether."
+            )
+
+        if schema_major == _SCHEMA_MAJOR and schema_minor > _SCHEMA_MINOR:
+            warnings.warn(
+                f"[aether] Archive '{path.name}' uses manifest schema v{schema_version}, "
+                f"newer than the v{_SCHEMA_VERSION} this build of aether writes. It loads, "
+                f"but may carry configuration this version does not recognize and will ignore.",
+                UserWarning,
+                stacklevel=2,
             )
 
         model = cls()
@@ -742,7 +915,7 @@ class Model():
         if manifest.get("seed") is not None:
             model.manual_seed(manifest["seed"])
 
-        # 1. Reconstruct Layers (Inline, tuple-sanitized, subclass-checked)
+        # Reconstruct Layers (Inline, tuple-sanitized, subclass-checked)
         for layer_entry in manifest.get("layers", []):
             class_name = layer_entry["class_name"]
             cfg = layer_entry.get("config", {})
@@ -760,12 +933,16 @@ class Model():
 
             model.add(layer_cls(**sanitized_cfg))
 
-        # 2. Reconstruct Training Components (Via table-driven helper)
+        # Reconstruct Training Components (Via table-driven helper)
         compile_cfg = manifest.get("compile") or {}
         components = {
             kind: _resolve_component(compile_cfg.get(kind), kind)
             for kind in ("loss", "optimizer", "accuracy")
         }
+
+        components["preprocessor"] = transforms_module.deserialize(
+            manifest.get("preprocessor")
+        )
 
         if any(component is not None for component in components.values()):
             model.configure(**components)
@@ -774,7 +951,7 @@ class Model():
         input_shape = tuple(manifest["input_shape"])
         model.finalize(input_shape=input_shape)
 
-        # 3. Load & Map Weights
+        # Load & Map Weights
         layer_param_map: dict[int, dict] = {}
         for flat_key, array in raw_weights.items():
             if "." not in flat_key:

@@ -2,6 +2,8 @@
 Simple null objects that are used by the Model class.
 Avoids making us write needless branch conditionals.
 """
+from aether.preprocessing.transforms import Preprocess
+
 class NullAccuracy:
     def calculate(self, *args, **kwargs):
         return 0.0
@@ -58,3 +60,32 @@ class _NullProgress:
 
     def close(self) -> None:
         return
+
+class NullPreprocessor(Preprocess):
+    """Null-object preprocessor for models with no attached preprocessing pipeline.
+
+    A pure identity: ``transform()`` hands back exactly what it was given, and the
+    device/precision hooks are genuine no-ops. Model.finalize() installs this
+    unconditionally so the per-batch dispatch can call ``.transform()`` with zero
+    ``is not None`` branching in the hot loop -- the same role NullOptimizer and
+    NullAccuracy play elsewhere in the codebase.
+
+    Deliberately does NOT absorb device migration or precision casting. Every
+    finalized model owns one of these, so a migrating null object would silently
+    add a host->device copy to every batch of every pipeline-free model -- exactly
+    the per-step PCIe traffic that Model._assert_device_alignment exists to forbid.
+    Device strictness stays with that guard; device migration stays with an
+    explicit ToTensor the user opted into.
+
+    Trivially fit, so it never triggers the implicit-fit path in train().
+    """
+    is_fitted = True
+
+    def _compile_for_device(self, device):
+        return
+
+    def _apply_precision(self, policy):
+        return
+
+    def transform(self, X):
+        return X
