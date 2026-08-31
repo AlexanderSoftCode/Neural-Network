@@ -22,8 +22,8 @@ notebooks = [
 ]
 
 dev = [
-    "aether-ml[safetensors],
-    "aether-ml[notebooks],
+    "aether-ml[safetensors]",
+    "aether-ml[notebooks]",
 ]
 
 [tool.setuptools.packages.find]
