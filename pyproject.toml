@@ -5,14 +5,26 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "aether-ml"
 version = "0.1.0"
-requires-python  = ">= 3.14"
+requires-python  = ">= 3.12"
 dependencies = [
     "numpy", 
 ]
 
 [project.optional-dependencies]
+safetensors = ["safetensors>=0.8.0"]
 gpu-nvidia = ["cupy-cuda12x"]   # CuPy wheel from PyPI
-gpu-amd = []                    # CuPy compiled inside aether-rocm.Dockerfile
+gpu-amd = []                    # CuPy compiled via ROCm container env
+
+notebooks = [
+    "safetensors>=0.8.0",
+    "jupyterlab",
+    "matplotlib",
+]
+
+dev = [
+    "aether-ml[safetensors],
+    "aether-ml[notebooks],
+]
 
 [tool.setuptools.packages.find]
 where = ["."]
