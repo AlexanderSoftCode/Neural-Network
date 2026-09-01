@@ -22,70 +22,73 @@ feature_pipeline = ae.Compose([
     ae.ToTensor(dtype='float32', target_device=TARGET_DEVICE),
     ae.Rescale(factor=1.0 / 255.0),
     ae.StandardScaler()
-]).fit(X_train)
+])
 
-# 2. Transform train and test features seamlessly
-X_train_tensor = feature_pipeline(X_train)
-X_test_tensor = feature_pipeline(X_test)
-
-# 3. Convert target labels
+"""# 3. Convert target labels
 y_train_tensor, y_test_tensor = ae.to_tensor(
     y_train, y_test, target_device=TARGET_DEVICE, preserve_integers=True
 )
-
-print(f"{X_train.shape=}, {X_train.dtype=}, {type(X_train)=}")
-print(f"{y_train.shape=}, {y_train.dtype=}, {type(y_train)}")
-print(f"{X_train_tensor.shape=}, {X_train_tensor.dtype=}, {type(X_train_tensor)=}")
-print(f"{y_train_tensor.shape=}, {y_train_tensor.dtype=}, {type(y_train_tensor)}")
-
+"""
+train_x_demo = X_train[:8192*4]
+train_y_demo = y_train[:8192*4]
+val_x_demo   = X_test[:1000]
+val_y_demo   = y_test[:1000]
 SEED = 42
 model = ae.Model()
-
-"""
-model.add(ae.Flatten())
-model.add(ae.Dense(32*32*3, 1024))
-model.add(ae.BatchNorm(n_features=1024))
-model.add(ae.ReLU())
-model.add(ae.Dense(1024, 256))
-model.add(ae.LeakyReLU(alpha=0.01))
-model.add(ae.Dropout(rate=0.05, seed=SEED))
-model.add(ae.Dense(256, 10))
-"""
-
 model.manual_seed(seed=42)
-# --- Block 1: Feature Extraction ---
+
+# --- Block 1: Low-level edges & colors (32x32 -> 16x16) ---
 model.add(ae.Conv2d(3, 32, (3, 3), (1, 1), padding="same"))
-model.add(ae.BatchNorm())                                   # 1. Normalize before activation
-model.add(ae.ReLU())                                        # 2. Non-linearity
-model.add(ae.MaxPool2d((2, 2), (2, 2), padding="valid"))    # 3. Spatial downsampling
+model.add(ae.BatchNorm(epsilon=1e-5, momentum=0.9))
+model.add(ae.ReLU())
+model.add(ae.Conv2d(32, 32, (3, 3), (1, 1), padding="same"))
+model.add(ae.BatchNorm(epsilon=1e-5, momentum=0.9))
+model.add(ae.ReLU())
+model.add(ae.MaxPool2d((2, 2), (2, 2), padding="valid"))
+model.add(ae.SpatialDropout(rate=0.1, seed=42))
 
-# --- Block 2: Higher-Level Representations ---
-model.add(ae.Conv2d(32, 64, (3, 3), (1, 1), padding="same"))
-model.add(ae.BatchNorm())                                   # 1. Normalize before activation
-model.add(ae.LeakyReLU(alpha=0.01))                         # 2. Non-linearity
-model.add(ae.SpatialDropout(rate=0.05, seed=42))            # 3. Regularization on active feature maps
+# --- Block 2: Intermediate textures & patterns (16x16 -> 8x8) ---
+model.add(ae.Conv2d(32, 64, (3, 3), (1, 1), padding="same", l2=1e-5))
+model.add(ae.BatchNorm(epsilon=1e-5, momentum=0.9))
+model.add(ae.ReLU())
+model.add(ae.Conv2d(64, 64, (3, 3), (1, 1), padding="same"))
+model.add(ae.BatchNorm(epsilon=1e-5, momentum=0.9))
+model.add(ae.ReLU())
+model.add(ae.MaxPool2d((2, 2), (2, 2), padding="valid"))
+model.add(ae.SpatialDropout(rate=0.15, seed=42))
 
-# --- Block 3: Classifier Head ---
-model.add(ae.GlobalAvgPool())                               # Pool spatially: (Batch, H, W, 64) -> (Batch, 64)
-model.add(ae.Dense(64, 10))
+# --- Block 3: High-level class semantics (8x8 -> 4x4) ---
+model.add(ae.Conv2d(64, 128, (3, 3), (1, 1), padding="same"))
+model.add(ae.BatchNorm(epsilon=1e-5, momentum=0.9))
+model.add(ae.ReLU())
+model.add(ae.MaxPool2d((2, 2), (2, 2), padding="valid"))
+model.add(ae.SpatialDropout(rate=0.2, seed=42))
 
-# --- Model Configuration ---
+# --- Head: Parameter-efficient classification ---
+model.add(ae.GlobalAvgPool())
+model.add(ae.Dense(128, 10))
+
+# --- Compilation & Training ---
 model.configure(
-    loss=ae.SoftmaxCategoricalCrossEntropy(label_smoothing=0.01),
-    optimizer=ae.Adam(learning_rate=0.001, decay=5e-5),
-    accuracy=ae.CategoricalAccuracy()
+    loss=ae.SoftmaxCategoricalCrossEntropy(label_smoothing=0.05),
+    optimizer=ae.AdamW(lr=0.001, decay=1e-4, weight_decay=0.01),
+    accuracy=ae.CategoricalAccuracy(),
+    preprocessor=feature_pipeline
 )
 
-#model.set_precision("float16")
 model.to('cupy')
 model.set_precision(compute_dtype="float16")
-#the could also write model.set_precision("blfoat16")
-model.finalize(input_shape=(32,32,3))
+model.finalize(input_shape=X_train.shape[1:])
+
 model.train(
-    X=X_train_tensor, 
-    y=y_train_tensor, 
-    epochs=5, 
-    batch_size=128,
-    print_every=100, 
-    validation_data=(X_test_tensor, y_test_tensor)
+    X=train_x_demo,
+    y=train_y_demo,
+    epochs=4,
+    batch_size=256,
+    shuffle=True,
+    print_every=100,
+    verbose=1,
+    validation_data=(val_x_demo, val_y_demo)
 )
+
+model.save(filepath="saved_models/cifar10_3block_cnn.aether")

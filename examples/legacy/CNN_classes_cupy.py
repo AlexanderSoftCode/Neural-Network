@@ -216,8 +216,8 @@ class Pooling:
             
         #Store both of these for backprop
         self.inputs = inputs
-        output = pooled
-        return output
+        self.output = pooled
+        return self.output
     
     def backward(self, dvalues):
 
@@ -344,7 +344,7 @@ class Dense:
                  bias_regularizer_l1 = 0, weight_regularizer_l2 = 0,
                  bias_regularizer_l2 = 0):
         #With He initalization, our fan_in maintains proper variance through layers.
-        self.weights = .01 * cp.random.randn(n_inputs, n_neurons) * \
+        self.weights = cp.random.randn(n_inputs, n_neurons) * \
             cp.sqrt(2.0 / n_inputs)
         self.biases = cp.zeros((1, n_neurons))
         self.weight_regularizer_l1 = weight_regularizer_l1
@@ -566,7 +566,7 @@ class Flatten:
         self.dinputs = dvalues.reshape(self.inputs_shape)
 
 class SoftMax:
-    def forward(self, inputs, training):
+    def forward(self, inputs, training=True):
         self.exp_values = cp.exp(inputs - cp.max(inputs, axis=1, keepdims = True)) #e**(inputs - max(inputs by row))
         probabilities = self.exp_values / cp.sum(self.exp_values, axis=1, keepdims = True) #e**k / sum(e**k) 
         self.output = probabilities
@@ -590,6 +590,11 @@ class SoftMax:
         return cp.argmax(outputs, axis = 1) #return the max of the rows
     
 class Loss: 
+    def __init__(self):
+        self.trainable_layers = []
+        self.accumulated_sum = 0
+        self.accumulated_count = 0
+
     def remember_trainable_layers(self, trainable_layers):
         self.trainable_layers = trainable_layers
 
@@ -637,6 +642,7 @@ class Loss:
 
 class Loss_CategoricalCrossEntropy(Loss): 
     def __init__(self, label_smoothing = 0.0):
+        super().__init__()
         self.label_smoothing = label_smoothing 
 
     def forward(self, y_pred, y_true, training = True):
@@ -686,7 +692,7 @@ class Activation_Softmax_Loss_CategoricalCrossEntropy():
     #y_true is the vector of correct class indices, one per sample.
     #dvalues is output of softmax layer shape(n_samples, n_classes)
     def forward(self, inputs, y_true, training = True):
-        self.activation.forward(inputs)                 #call forward function of softmax
+        self.activation.forward(inputs, training=training)         #call forward function of softmax
         self.output = self.activation.output            #take the output as output of forward
         return self.loss.calculate(self.output, y_true, training = training) #take the loss via the ouput of softmax versus true
     
