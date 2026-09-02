@@ -101,7 +101,7 @@ class Dense(Layer):
             raise RuntimeError(
                 "Dense.backard() called without a preceeding training=True during" \
                 "forward pass. If you are manually tracing through the layers, please" \
-                "add training=True to Dense.forward()"
+                " add training=True to Dense.forward()"
             )
         dvalues_c = self.precision_policy.cast_to_compute(dvalues)
 

@@ -29,7 +29,6 @@ class TestGlobalAvgPool(base_case.AetherBaseLayerTestCase):
         if self.backend_name != 'cupy' or not config.HAS_CUPY:
             self.skipTest("Applies only to CuPy pass")
 
-
         layer_cpu = self.make_built_layer(
             GlobalAvgPool, 
             input_shape=(self.H, self.W, self.C),
@@ -143,16 +142,19 @@ class TestGlobalAvgPool(base_case.AetherBaseLayerTestCase):
             self.skipTest("Skipping GPU launch metadata test for CPU backend.")
             
         shape = (4, 14, 14, 64)
-        meta_1 = self.layer._get_shape_meta(shape, self.layer._block_z)
-        meta_2 = self.layer._get_shape_meta(shape, self.layer._block_z)
+        meta_1 = self.layer._get_shape_meta(shape)
+        meta_2 = self.layer._get_shape_meta(shape)
         
         self.assertIs(meta_1, meta_2)
         self.assertEqual(meta_1["out_shape"], (4, 64))
 
     def test_thin_channels_launch_geometry(self):
         """Verify launch geometry calculation when channels C <= 32."""
+        if not self.uses_gpu_kernel:
+            self.skipTest("Skipping GPU launch metadata test for CPU backend.")
+
         thin_shape = (2, 28, 28, 8)
-        meta = self.layer._get_shape_meta(thin_shape, block_z=4)
+        meta = self.layer._get_shape_meta(thin_shape)
         
         self.assertEqual(meta["block_dim"][0], 8)
         self.assertEqual(meta["grid_dim"][0], 1)  # (8 + 8 - 1) // 8 == 1

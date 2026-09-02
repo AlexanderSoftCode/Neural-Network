@@ -33,33 +33,38 @@ class LeakyReLU(Layer):
     def __init__(self, alpha=0.01):
         super().__init__()
         self.alpha = alpha
+        self.precision_policy = config.DTypePolicy(compute_dtype=None)
+        self._alpha_compute = self.precision_policy.cast_to_compute(np.float32(self.alpha))
 
         self.forward = self._forward_fallback
         self.backward = self._backward_fallback
 
+    def _apply_precision(self, policy):
+        """Called on Model.set_precision(); re-derives alpha in the active compute dtype."""
+        self.precision_policy = policy or config.DTypePolicy()
+        self._alpha_compute = self.precision_policy.cast_to_compute(np.float32(self.alpha))
+
     def _compile_for_device(self, device):
         """Triggered by Model.to(device) to map low-level hardware paths"""
         if device == 'cupy' and _fused_leaky_relu_forward is not None and _fused_leaky_relu_backward is not None:
-            self.forward = self._forward_gpu   
+            self.forward = self._forward_gpu
             self.backward = self._backward_gpu
         else:
             self.forward = self._forward_fallback
             self.backward = self._backward_fallback
 
     def _forward_gpu(self, inputs, training):
-        """Dedicated GPU execution with cp.fuse"""
-        self.output = _fused_leaky_relu_forward(inputs, self.alpha)
+        self.output = _fused_leaky_relu_forward(inputs, self._alpha_compute)
         return self.output
-    
+
     def _forward_fallback(self, inputs, training):
-        xp = config.get_array_module(inputs)        
+        xp = config.get_array_module(inputs)
         self.output = xp.maximum(0, inputs) + self.alpha * xp.minimum(0, inputs)
         return self.output
-    
+
     def _backward_gpu(self, dvalues):
-        """Dedicated GPU execution with cp.fuse"""
-        self.dinputs = _fused_leaky_relu_backward(dvalues, self.output, self.alpha)
-        return self.dinputs 
+        self.dinputs = _fused_leaky_relu_backward(dvalues, self.output, self._alpha_compute)
+        return self.dinputs
     
     def _backward_fallback(self, dvalues):
         self.dinputs = dvalues * (1.0 - (self.output <= 0) * (1.0 - self.alpha))

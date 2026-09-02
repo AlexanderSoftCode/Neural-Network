@@ -483,37 +483,26 @@ class GlobalAvgPool(Layer):
     
         self.output_shape = (C_in,)
         return self.output_shape
-    @staticmethod
-    def _resolve_gpu_variant():
-        """CUDA vs HIP variant + recommended launch block depth."""
-        is_hip = config.HAS_CUPY and config.xp.cuda.runtime.is_hip
-        variant = "hip" if is_hip else "cuda"
-        block_z = 2 if is_hip else 4
-        return variant, block_z
     
-    def _get_shape_meta(self, input_shape, block_z):
+    def _get_shape_meta(self, input_shape):
         """
         Similar to _PoolNd._get_shape_meta, however a bit simpler meaning no need
         to refactor that method to include support for GAP. 
         """
-        cache_key = (input_shape, block_z)
+        cache_key = (input_shape, self._target_threads)
         cached = self._launch_cache.get(cache_key)
         if cached is not None:
             return cached
 
         S, H, W, C = input_shape
+        if S <= 0 or C <= 0 or H <= 0 or W <= 0:
+            raise ValueError(f"GlobalAvgPool input dimensions must all be positive, got {input_shape}")
+
         inv_area = np.float32(1.0 / (H * W))
-        target_threads = 1024 if block_z == 4 else 512
-        target_2d = target_threads // block_z # Always 256
-        if C <= 32:
-            block_x = max(1, C)
-            block_y = target_2d // block_x
-        else:
-            block_x = min(32, C)
-            block_y = 8
-
-        block_dim = (block_x, block_y, block_z)
-
+        block_x = min(32, C)
+        max_y = self._target_threads // block_x
+        block_y = min(S, max_y)
+        block_dim = (block_x, block_y, 1)
         # Calculate grid geometry based on kernel mapping:
         # threadIdx.x / blockIdx.x -> Channel axis (C)
         # threadIdx.y / blockIdx.y -> Sample/Batch axis (S)
@@ -527,10 +516,7 @@ class GlobalAvgPool(Layer):
             np.float32(inv_area)
         )
         meta = {
-            "S": S, 
-            "H": H, 
-            "W": W, 
-            "C": C,
+            "S": S, "H": H, "W": W, "C": C,
             "out_shape": (S, C),
             "block_dim": block_dim,
             "grid_dim": grid_dim,
@@ -542,54 +528,41 @@ class GlobalAvgPool(Layer):
     def _compile_for_device(self, device):
 
         if device == "cupy" and config.HAS_CUPY:
-            variant, block_z = self._resolve_gpu_variant()
-
+            variant, target_threads = config.resolve_gpu_launch_geometry()
+            
             self.kernel_forward = gpu_pooling.get_gap_forward_kernel(variant)
             self.kernel_backward = gpu_pooling.get_gap_backward_kernel(variant)
 
             self._variant = variant
-            self._block_z = block_z
-            self.forward = partial(self._forward_gpu, block_z=block_z)
-            self.backward = partial(self._backward_gpu, block_z=block_z)
-
+            self._target_threads = target_threads
+            self.forward = self._forward_gpu
+            self.backward = self._backward_gpu
         else:
             self.forward = self._forward_fallback
             self.backward = self._backward_fallback
 
-
-    def _forward_gpu(self, inputs, training, block_z):
-        xp = config.get_array_module(inputs)
+    def _forward_gpu(self, inputs, training):
+        xp = config.xp
         self.inputs_shape = inputs.shape
-        meta = self._get_shape_meta(self.inputs_shape, block_z)
+        meta = self._get_shape_meta(self.inputs_shape)
 
         # Allocate device array matching (S, C) output shape
         self.output = xp.empty(meta["out_shape"], dtype=inputs.dtype)
-        
         kernel_args = (inputs, self.output) + meta["static_args"]
         
-        # Launch kernel with grid_dim, block_dim, and arguments
         self.kernel_forward(meta["grid_dim"], meta["block_dim"], kernel_args)
         return self.output
 
     def _backward_gpu(self, dvalues):
-        xp = config.get_array_module(dvalues)
-        dvalues = xp.empty(self.input_shape, dtype=xp.dvalues.dtype)
-
-        meta = self._get_shape_meta(self.inputs_shape, self._block_z)
-        kernel_args = (dvalues, self.dinputs) + meta["static_args"]
-
-        self.kernel_backward(meta["grid_dim"], meta["block_dim"], kernel_args)
-        return self.dinputs
-
-    def _backward_gpu(self, dvalues, block_z):
-        xp = config.get_array_module(dvalues)        
-        meta = self._get_shape_meta(self.inputs_shape, block_z)
+        xp = config.xp
+        meta = self._get_shape_meta(self.inputs_shape)
+        
         self.dinputs = xp.empty(self.inputs_shape, dtype=dvalues.dtype)
-        
         kernel_args = (dvalues, self.dinputs) + meta["static_args"]
+    
         self.kernel_backward(meta["grid_dim"], meta["block_dim"], kernel_args)
-        
         return self.dinputs
+    
     def _forward_fallback(self, inputs, training):
         xp = config.get_array_module(inputs)
         self.inputs_shape = inputs.shape
