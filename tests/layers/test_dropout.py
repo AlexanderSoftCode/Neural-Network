@@ -34,14 +34,11 @@ class TestDropout(base_case.AetherBaseLayerTestCase):
         output = self.layer.forward(inputs, training=True)
         self.assertEqual(output.shape, inputs.shape)
 
-    def test_forward_eval_mode_is_identity_copy(self):
+    def test_forward_eval_mode_returns_input_unchanged(self):
         inputs = self.xp.arange(20, dtype=self.xp.float32).reshape(4, 5)
         output = self.layer.forward(inputs, training=False)
         self.assertTrue(bool(self.xp.all(output == inputs)))
 
-        # Confirm it's a copy, not a shared buffer.
-        output[0, 0] = 999
-        self.assertFalse(bool(inputs[0, 0] == 999))
 
     def test_forward_training_zero_rate_is_identity(self):
         layer = self.make_built_layer(Dropout, input_shape=(500,), rate=0.0)
@@ -91,43 +88,48 @@ class TestDropout(base_case.AetherBaseLayerTestCase):
 
         self.assertTrue(bool(self.xp.allclose(forward_out, dinputs)))
 
-    def test_repeated_forward_calls_use_different_masks(self):
-        n = 5000
+    def test_repeated_forward_in_same_step_reuses_mask(self):
+        n = 50
         inputs = self.xp.ones(n, dtype=self.xp.float32)
-        first = self.layer.forward(inputs, training=True)
+        first = self.layer.forward(inputs, training=True).copy()
         second = self.layer.forward(inputs, training=True)
-        self.assertFalse(bool(self.xp.all(first == second)))
+        self.assertTrue(bool(self.xp.all(first == second)))
 
-    # ---- philox / GPU-path bookkeeping --------------------------------
+    # ---- clock / offset bookkeeping -----------------------------------
+    # These reach into _clock and _active_offset deliberately: the contract under
+    # test *is* the RNG bookkeeping, so the coupling to internals is intentional.
 
-    def test_offset_increments_on_gpu_path(self):
-        if not self.uses_gpu_kernel:
-            self.skipTest('offset bookkeeping only applies to the philox GPU path')
-
+    def test_forward_does_not_advance_the_clock(self):
         layer = self.make_built_layer(Dropout, input_shape=(100,), rate=0.5)
         inputs = self.xp.ones(100, dtype=self.xp.float32)
 
-        # Offset starts at 0 before any training steps
-        self.assertEqual(layer.rng.offset, 0)
-
-        # First training forward pass advances offset
+        # The layer reads the clock but never steps it; the training loop owns advancement.
+        self.assertEqual(layer._clock.value, 0)
         layer.forward(inputs, training=True)
-        self.assertEqual(layer.rng.offset, 1)
-
-        # Second training forward pass advances offset again
+        self.assertEqual(layer._clock.value, 0)
         layer.forward(inputs, training=True)
-        self.assertEqual(layer.rng.offset, 2)
+        self.assertEqual(layer._clock.value, 0)
 
-    def test_eval_mode_does_not_bump_offset(self):
-        if not self.uses_gpu_kernel:
-            self.skipTest('offset bookkeeping only applies to the philox GPU path')
-
+    def test_active_offset_tracks_the_clock(self):
         layer = self.make_built_layer(Dropout, input_shape=(100,), rate=0.5)
         inputs = self.xp.ones(100, dtype=self.xp.float32)
 
-        # Inference / evaluation pass should not step the RNG state
+        layer.forward(inputs, training=True)
+        self.assertEqual(layer._active_offset, 0)
+
+        layer._clock.advance()
+        layer.forward(inputs, training=True)
+        self.assertEqual(layer._active_offset, 1)
+
+    def test_eval_mode_clears_active_offset(self):
+        layer = self.make_built_layer(Dropout, input_shape=(100,), rate=0.5)
+        inputs = self.xp.ones(100, dtype=self.xp.float32)
+
+        # Run a training pass first so the reset is actually observable.
+        layer.forward(inputs, training=True)
         layer.forward(inputs, training=False)
-        self.assertEqual(layer.rng.offset, 0)
 
+        self.assertEqual(layer._clock.value, 0)
+        self.assertEqual(layer._active_offset, -1)
 
 base_case.register_test_suites(globals(), TestDropout)

@@ -83,15 +83,22 @@ class TestCnnTrainingPipeline(ModelIntegrationBaseCase):
         SpatialDropout differently, since that only shows up once it's
         embedded in a full Model.forward() call, not in isolation."""
         model = self.build_cnn_model()
-        train_out_1 = model.forward(self.X, training=True)
+
+        train_out_1 = model.forward(self.X, training=True).copy()
+        model._rng_clock.advance()
         train_out_2 = model.forward(self.X, training=True)
-        eval_out_1 = model.forward(self.X, training=False)
+
+        eval_out_1 = model.forward(self.X, training=False).copy()
         eval_out_2 = model.forward(self.X, training=False)
 
+        # Successive training steps draw fresh masks.
         self.assertFalse(bool(self.xp.allclose(train_out_1, train_out_2)))
-        self.xp.testing.assert_allclose(
-            eval_out_1, eval_out_2, rtol=1e-5, atol=1e-6
-        )
+
+        # Eval is deterministic and mask-free.
+        self.xp.testing.assert_allclose(eval_out_1, eval_out_2, rtol=1e-5, atol=1e-6)
+
+        # Dropout is actually active in training mode.
+        self.assertFalse(bool(self.xp.allclose(train_out_1, eval_out_1)))
 
     def test_loss_decreases_over_training_steps(self):
         """Composition-level check driven through the public Model.train()

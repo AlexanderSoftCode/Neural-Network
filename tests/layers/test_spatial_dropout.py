@@ -29,17 +29,33 @@ class TestSpatialDropout(base_case.AetherBaseLayerTestCase):
 
         self.assertEqual(output.shape, inputs.shape)
 
-    def test_forward_eval_mode_is_identity_copy(self):
+    def test_forward_eval_mode_returns_input_unchanged(self):
         # 2 * 4 * 4 * 3 = 96 total elements
-        layer = self.make_built_layer(SpatialDropout, input_shape=(4, 4, 3), seed=self.FIXED_SEED, rate=self.DEFAULT_RATE)
-        inputs = self.xp.arange(96, dtype=self.xp.float32).reshape(2,4,4,3)
+        layer = self.make_built_layer(
+            SpatialDropout,
+            input_shape=(4, 4, 3),
+            seed=self.FIXED_SEED,
+            rate=self.DEFAULT_RATE,
+        )
+        inputs = self.xp.arange(96, dtype=self.xp.float32).reshape(2, 4, 4, 3)
         output = layer.forward(inputs, training=False)
 
-        self.assertTrue(bool(self.xp.all(output == inputs)))
+        # Eval mode is the identity: no scaling, no copy, no allocation.
+        self.assertIs(output, inputs)
 
-        # Assert that its a defensive copy
-        output[0, 0, 0, 0] = 999.0
-        self.assertNotEqual(inputs[0, 0, 0, 0].item(), 999.0)
+    def test_backward_after_eval_forward_raises(self):
+        layer = self.make_built_layer(
+            SpatialDropout,
+            input_shape=(4, 4, 3),
+            seed=self.FIXED_SEED,
+            rate=self.DEFAULT_RATE,
+        )
+        inputs = self.xp.arange(96, dtype=self.xp.float32).reshape(2, 4, 4, 3)
+        layer.forward(inputs, training=False)
+
+        with self.assertRaises(RuntimeError):
+            layer.backward(self.xp.ones_like(inputs))
+
     def test_forward_training_zero_rate_is_identity(self):
         layer = self.make_built_layer(SpatialDropout, input_shape = (10, 10, 5), seed=self.FIXED_SEED, rate=0.0)
         # 2 * 10 * 10 * 5 = 1000 total elements
@@ -84,39 +100,79 @@ class TestSpatialDropout(base_case.AetherBaseLayerTestCase):
 
         self.assertTrue(bool(self.xp.allclose(forward_out, dinputs)))
 
-    def test_repeated_forward_calls_use_different_masks(self): 
+    def test_repeated_forward_in_same_step_reuses_mask(self):
         tensor_shape = (2, 10, 10, 25)
-        layer = self.make_built_layer(SpatialDropout, input_shape=(10, 10, 25), seed=self.FIXED_SEED, rate=self.DEFAULT_RATE)
+        layer = self.make_built_layer(
+            SpatialDropout,
+            input_shape=(10, 10, 25),
+            seed=self.FIXED_SEED,
+            rate=self.DEFAULT_RATE,
+        )
         inputs = self.xp.ones(tensor_shape, dtype=self.xp.float32)
-        first = layer.forward(inputs, training=True)
+
+        first = layer.forward(inputs, training=True).copy()
         second = layer.forward(inputs, training=True)
+
+        self.assertTrue(bool(self.xp.all(first == second)))
+
+    def test_forward_across_steps_uses_different_masks(self):
+        tensor_shape = (2, 10, 10, 25)
+        layer = self.make_built_layer(
+            SpatialDropout,
+            input_shape=(10, 10, 25),
+            seed=self.FIXED_SEED,
+            rate=self.DEFAULT_RATE,
+        )
+        inputs = self.xp.ones(tensor_shape, dtype=self.xp.float32)
+
+        first = layer.forward(inputs, training=True).copy()
+        layer._clock.advance()
+        second = layer.forward(inputs, training=True)
+
         self.assertFalse(bool(self.xp.all(first == second)))
 
-    # ---- philox / GPU-path bookkeeping --------------------------------
 
-    def test_call_counter_increments_on_gpu_path(self):
-        if not self.uses_gpu_kernel:
-            self.skipTest('offset bookkeeping only applies to the philox GPU path')
+    # ---- clock / offset bookkeeping -----------------------------------
 
-        layer = self.make_built_layer(SpatialDropout, input_shape=(5, 5, 25), seed=self.FIXED_SEED, rate=0.5)
+    def test_forward_does_not_advance_the_clock(self):
         tensor_shape = (2, 5, 5, 25)
+        layer = self.make_built_layer(
+            SpatialDropout, input_shape=(5, 5, 25), seed=self.FIXED_SEED, rate=0.5
+        )
         inputs = self.xp.ones(shape=tensor_shape, dtype=self.xp.float32)
 
-        self.assertEqual(layer.rng.offset, 0)
+        self.assertEqual(layer._clock.value, 0)
         layer.forward(inputs, training=True)
-        self.assertEqual(layer.rng.offset, 1)
+        self.assertEqual(layer._clock.value, 0)
         layer.forward(inputs, training=True)
-        self.assertEqual(layer.rng.offset, 2)
+        self.assertEqual(layer._clock.value, 0)
 
-    def test_eval_mode_does_not_bump_call_counter(self):
-        if not self.uses_gpu_kernel:
-            self.skipTest('offset bookkeeping only applies to the philox GPU path')
-
+    def test_active_offset_tracks_the_clock(self):
         tensor_shape = (2, 5, 5, 25)
-        layer = self.make_built_layer(SpatialDropout, input_shape=(5, 5, 25), seed=self.FIXED_SEED, rate=0.5)
+        layer = self.make_built_layer(
+            SpatialDropout, input_shape=(5, 5, 25), seed=self.FIXED_SEED, rate=0.5
+        )
         inputs = self.xp.ones(shape=tensor_shape, dtype=self.xp.float32)
+
+        layer.forward(inputs, training=True)
+        self.assertEqual(layer._active_offset, 0)
+
+        layer._clock.advance()
+        layer.forward(inputs, training=True)
+        self.assertEqual(layer._active_offset, 1)
+
+    def test_eval_mode_clears_active_offset(self):
+        tensor_shape = (2, 5, 5, 25)
+        layer = self.make_built_layer(
+            SpatialDropout, input_shape=(5, 5, 25), seed=self.FIXED_SEED, rate=0.5
+        )
+        inputs = self.xp.ones(shape=tensor_shape, dtype=self.xp.float32)
+
+        layer.forward(inputs, training=True)
         layer.forward(inputs, training=False)
-        self.assertEqual(layer.rng.offset, 0)
+
+        self.assertEqual(layer._clock.value, 0)
+        self.assertEqual(layer._active_offset, -1)
 
 
 base_case.register_test_suites(globals(), TestSpatialDropout)

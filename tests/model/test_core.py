@@ -96,7 +96,10 @@ class TestModelCore(ModelBaseTestCase):
 
         self.assertEqual(l1_m1.seed, base_seed + 0)
         self.assertEqual(l2_m1.seed, base_seed + 1)
-        self.assertEqual(l3_m1.seed, base_seed + 2)
+
+        self.assertIsNone(l3_m1.seed)
+        self.assertEqual(l3_m1._seed_key, l3_m2._seed_key)
+        self.assertIs(l3_m1._clock, model1._rng_clock)
 
         self.xp.testing.assert_allclose(l1_m1.weights, l1_m2.weights)
         self.xp.testing.assert_allclose(l2_m1.weights, l2_m2.weights)

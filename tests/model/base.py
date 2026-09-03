@@ -53,9 +53,19 @@ class SpyLifecycleLayer(Layer):
 
 class SpySetSeedLayer(Layer):
     """Spy layer relying strictly on the _set_seed() hook instead of build()."""
+    is_stochastic=True
     def __init__(self):
         super().__init__()
         self.seed = None
+        self._seed_key = None
+        self._clock = None
+        self.bind_calls = []
+        
+    def _bind_rng(self, *, base_seed, stream_id, clock):
+        self.bind_calls.append((base_seed, stream_id))
+        if self.seed is None:
+            self._seed_key = config.derive_stream_seed(base_seed, stream_id)
+        self._clock = clock
 
     def _set_seed(self, seed):
         self.seed = seed
