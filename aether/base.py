@@ -3,6 +3,7 @@ import aether.config as config
 
 class Layer:
     _precision_exempt: bool = False
+    is_stochastic: bool = False
     def __init__(self):
         self.seed = None
         # these attributes below will likely be used for Model.save()

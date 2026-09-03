@@ -1,57 +1,72 @@
 import numpy as np
+
 import aether.config as config
 from aether.base import Layer
 from aether.custom_kernels import dropout_kernel as gpu_dropout
 
-class DropoutRNGState:
 
-    _stream_counter = 0
-
-    def __init__(self, base_seed=None):
-        self.stream_id = DropoutRNGState._stream_counter
-        DropoutRNGState._stream_counter += 1
-
-        self.seed = self._derive_stream_seed(base_seed, self.stream_id)
-        self.offset = 0
-    def step(self):
-        """Advances the offset for a training step by 1"""
-        self.offset += 1
-        return self.offset
-    
-    @staticmethod
-    def _derive_stream_seed(base_seed, stream_id):
-        """
-        Derives a deterministic 64-bit seed for a sepcific random stream. 
-        Passing in the same `base_seed` and `stream_id` guarantees identical output
-        across runs. 
-        """
-        if base_seed is None: 
-            entropy = None
-            spawn_key = (int(stream_id),)
-        else:
-            entropy = [int(base_seed), int(stream_id)]
-            spawn_key = ()
-        
-        seed_seq = np.random.SeedSequence(entropy, spawn_key=spawn_key)
-        return int(seed_seq.generate_state(1, dtype=np.uint64)[0])
-    
-class Dropout(Layer): 
+class _DropoutBase(Layer):
+    """
+    Shared state and RNG plumbing for stochastic dropout layers.
+    """
+    is_stochastic = True
     def __init__(self, rate, seed=None):
         super().__init__()
-        self.keep_rate = 1 - rate
 
-        self.rng = DropoutRNGState(base_seed=self.seed)
+        if not 0.0 <= rate < 1.0:
+            raise ValueError(
+                f"[aether] Dropout rate must be in the interval [0.0, 1.0), got {rate}."
+            )
+
+        self.rate = float(rate)
+        self.keep_rate = 1.0 - self.rate
+        self._inv_keep = 1.0 / self.keep_rate
+
+        self.seed = seed
+        self._seed_key = config.derive_stream_seed(seed, 0)
+
+        self._clock = config.TrainingClock()
+        self._active_offset = -1
+
         self.forward = self._forward_fallback
         self.backward = self._backward_fallback
 
-    def _set_seed(self, seed: int | None):
-        """Rebinds the layer seed and instantiates its specific RNG state."""
-        self.seed = seed
-        self.rng = DropoutRNGState(base_seed=seed)
+    def _bind_rng(self, *, base_seed, stream_id, clock):
+        """
+        Called once by Model.finalize(). An explicit per-layer seed always wins; the
+        clock is rebound unconditionally so the model owns step advancement.
+        """
+        if self.seed is None:
+            self._seed_key = config.derive_stream_seed(base_seed, stream_id)
+        self._clock = clock
+
+    def _make_generator(self, xp, offset):
+        if xp is np:
+            return np.random.Generator(
+                np.random.Philox(key=self._seed_key, counter=offset)
+            )
+        return xp.random.default_rng(config.derive_stream_seed(self._seed_key, offset))
+
+    def _require_offset(self):
+        if self._active_offset < 0:
+            raise RuntimeError(
+                f"[aether] {type(self).__name__}.backward() called without a preceding "
+                "training forward pass. The dropout mask cannot be reconstructed."
+            )
+        return self._active_offset
+
+    def get_config(self):
+        return {
+            "rate": self.rate,
+            "seed": self.seed,
+        }
+
+
+class Dropout(_DropoutBase):
 
     def _compile_for_device(self, device):
         """Triggered by Model.to(device) to map low-level hardware paths."""
-        if device == 'cupy' and gpu_dropout.is_gpu_dropout_available():
+        if device == "cupy" and gpu_dropout.is_gpu_dropout_available():
             self.forward = self._forward_gpu
             self.backward = self._backward_gpu
         else:
@@ -61,64 +76,57 @@ class Dropout(Layer):
     def _forward_gpu(self, inputs, training):
 
         if not training:
-            self.output = inputs.copy()
-            return self.output
-
-        offset = self.rng.step()
+            self._active_offset = -1
+            return inputs
+        
+        offset = self._clock.value
+        self._active_offset = offset
 
         self.output = gpu_dropout.philox_dropout_forward(
-            inputs, self.rng.seed, offset, float(self.keep_rate)
-        ) # type: ignore
+            inputs, self._seed_key, offset, self.keep_rate
+        )  # type: ignore
         return self.output
 
-    def _backward_gpu(self, dvalues): 
+    def _backward_gpu(self, dvalues):
 
         self.dinputs = gpu_dropout.philox_dropout_backward(
-            dvalues, self.rng.seed, self.rng.offset, float(self.keep_rate)
-        ) # type: ignore
+            dvalues, self._seed_key, self._require_offset(), self.keep_rate
+        )  # type: ignore
         return self.dinputs
-    
+
     def _forward_fallback(self, inputs, training):
 
         if not training:
-            self.output = inputs.copy()
-            return self.output
-        
+            self._active_offset = -1
+            return inputs
+        offset = self._clock.value
+        self._active_offset = offset
+
         xp = config.get_array_module(inputs)
-        self.binary_mask = (
-            xp.random.binomial(1, self.keep_rate, size=inputs.shape) / self.keep_rate
-        ).astype(inputs.dtype, copy=False)
+        gen = self._make_generator(xp, offset)
+
+        dtype = inputs.dtype
+        keep = dtype.type(self._inv_keep)
+        drop = dtype.type(0.0)
+
+        uniform = gen.random(inputs.shape, dtype=np.float32)
+        self.binary_mask = xp.where(uniform < self.keep_rate, keep, drop)
+
         self.output = inputs * self.binary_mask
         return self.output
 
     def _backward_fallback(self, dvalues):
+        self._require_offset()
         self.dinputs = dvalues * self.binary_mask
         return self.dinputs
 
-    def get_config(self):
-        return{
-            "rate": self.rate,
-            "seed": self.seed,
-        }
-class SpatialDropout(Layer): 
-    
-    def __init__(self, rate, seed=None):
-        super().__init__()
-        self.rate = rate
-        self.keep_rate = 1 - rate
 
-        self.rng = DropoutRNGState(base_seed=self.seed)
-
-        self.forward = self._forward_fallback
-        self.backward = self._backward_fallback
-
-    def _set_seed(self, seed: int | None):
-        self.seed = seed
-        self.rng = DropoutRNGState(base_seed=seed)
+class SpatialDropout(_DropoutBase):
+    """Channel-wise dropout for NHWC feature maps."""
 
     def _compile_for_device(self, device):
         """Triggered by Model.to(device) to map low-level hardware paths."""
-        if device == 'cupy' and gpu_dropout.is_gpu_spatial_dropout_available():
+        if device == "cupy" and gpu_dropout.is_gpu_spatial_dropout_available():
             self.forward = self._forward_gpu
             self.backward = self._backward_gpu
         else:
@@ -128,49 +136,51 @@ class SpatialDropout(Layer):
     def _forward_gpu(self, inputs, training):
 
         if not training:
-            self.output = inputs.copy()
-            return self.output
+            self._active_offset = -1
+            return inputs
+        
+        offset = self._clock.value
+        self._active_offset = offset
 
-        offset = self.rng.step()
-
-        # Stash the channel count such that each backward pass 
-        # can rebuild the philox PRNG mask
+        # Stash the channel count so backward can rebuild the Philox mask.
         self.C = inputs.shape[-1]
 
         self.output = gpu_dropout.philox_spatial_dropout_forward(
-            inputs, self.rng.seed, offset, float(self.keep_rate), self.C
-        ) # type: ignore
+            inputs, self._seed_key, offset, self.keep_rate, self.C
+        )  # type: ignore
         return self.output
 
     def _backward_gpu(self, dvalues):
+
         self.dinputs = gpu_dropout.philox_spatial_dropout_backward(
-            dvalues, self.rng.seed, self.rng.offset, float(self.keep_rate), self.C
-        ) # type: ignore
+            dvalues, self._seed_key, self._require_offset(), self.keep_rate, self.C
+        )  # type: ignore
         return self.dinputs
-    
+
     def _forward_fallback(self, inputs, training):
-        
-        xp = config.get_array_module(inputs)
-        self.inputs = inputs
 
         if not training:
-            self.output = inputs.copy()
-            return self.output
-        
-        C = self.inputs.shape[-1]
-        self.channel_mask = (
-            xp.random.binomial(1, self.keep_rate, size=(1, 1, 1, C)) / self.keep_rate
-        ).astype(inputs.dtype, copy=False)
-        self.output = inputs * self.channel_mask
+            self._active_offset = -1
+            return inputs
 
+        offset = self._clock.value
+        self._active_offset = offset
+
+        xp = config.get_array_module(inputs)
+        gen = self._make_generator(xp, offset)
+
+        self.C = inputs.shape[-1]
+        dtype = inputs.dtype
+        keep = dtype.type(self._inv_keep)
+        drop = dtype.type(0.0)
+
+        uniform = gen.random((1, 1, 1, self.C), dtype=np.float32)
+        self.channel_mask = xp.where(uniform < self.keep_rate, keep, drop)
+
+        self.output = inputs * self.channel_mask
         return self.output
-    
-    def _backward_fallback(self, dvalues): 
+
+    def _backward_fallback(self, dvalues):
+        self._require_offset()
         self.dinputs = dvalues * self.channel_mask
         return self.dinputs
-
-    def get_config(self):
-        return{
-            "rate": self.rate,
-            "seed": self.seed,
-        }

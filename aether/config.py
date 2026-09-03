@@ -158,6 +158,44 @@ def get_tensor_core_capable():
 
     return _TENSOR_CORE_CAPABLE
 
+def derive_stream_seed(base_seed, stream_id):
+    """
+    Derives a deterministic 64-bit key for a specific random stream. The same
+    `base_seed` and `stream_id` produce identical output across processes. A
+    `base_seed` of None pulls fresh OS entropy, giving an unseeded stream.
+    """
+    if base_seed is None:
+        entropy = None
+        spawn_key = (int(stream_id),)
+    else:
+        entropy = [int(base_seed), int(stream_id)]
+        spawn_key = ()
+
+    seed_seq = np.random.SeedSequence(entropy, spawn_key=spawn_key)
+    return int(seed_seq.generate_state(1, dtype=np.uint64)[0])
+    
+class TrainingClock:
+    """
+    Monotonic step counter shared by every stochastic layer in a model.
+
+    Stochastic layers read `value` during forward but never mutate it; the training
+    loop advances it exactly once per batch. This makes a repeated forward pass
+    within the same step reproduce the same mask, and decouples backward from
+    "whatever the stream head happens to be."
+    """
+
+    __slots__ = ("value",)
+
+    def __init__(self, value=0):
+        self.value = int(value)
+
+    def advance(self):
+        self.value += 1
+        return self.value
+
+    def reset(self, value=0):
+        self.value = int(value)
+
 class DTypePolicy():
 
     def __init__ (self, compute_dtype: str | None = None) -> None:

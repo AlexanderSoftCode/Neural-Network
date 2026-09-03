@@ -57,15 +57,15 @@ class LeakyReLU(Layer):
         self.output = _fused_leaky_relu_forward(inputs, self._alpha_compute)
         return self.output
 
+    def _backward_gpu(self, dvalues):
+        self.dinputs = _fused_leaky_relu_backward(dvalues, self.output, self._alpha_compute)
+        return self.dinputs
+
     def _forward_fallback(self, inputs, training):
         xp = config.get_array_module(inputs)
         self.output = xp.maximum(0, inputs) + self.alpha * xp.minimum(0, inputs)
         return self.output
 
-    def _backward_gpu(self, dvalues):
-        self.dinputs = _fused_leaky_relu_backward(dvalues, self.output, self._alpha_compute)
-        return self.dinputs
-    
     def _backward_fallback(self, dvalues):
         self.dinputs = dvalues * (1.0 - (self.output <= 0) * (1.0 - self.alpha))
         return self.dinputs

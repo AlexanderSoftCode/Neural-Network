@@ -87,6 +87,7 @@ class Model():
         self.preprocessor = None
         self._seed = None
         self._predict_activation = None
+        self._rng_clock = None
 
     def add(self, layer):
         if self.is_finalized:   
@@ -192,7 +193,7 @@ class Model():
             ... # Now we can train and evaluate in cupy backend
             ... model.configure
             ... model.finalize(input_shape=(...))
-            ... model.train(X, y, epochs=5, shuffle=True, evaluat)
+            ... model.train(X, y, epochs=5, shuffle=True)
             ... model.evaluate(X_val, y_val)
             ... model.to("numpy")
             ... # We can perform inference on the CPU now
@@ -250,27 +251,37 @@ class Model():
         Finalizes the model architecture, propagating tensor dimensions
         and allocating weights/buffers across all registered layers.
         """
-        if self.is_finalized:   
+        if self.is_finalized:
             raise RuntimeError("Cannot modify model after finalize() has been called.")
 
         if not self.layers:
-            raise RuntimeError("[aether] Cannot finalize an empty model. Please add layers via Model.add() first.")
+            raise RuntimeError(
+                "[aether] Cannot finalize an empty model. Please add layers via Model.add() first."
+            )
+
+        # Reuse a clock restored by load(); otherwise start a fresh stream at step 0.
+        if getattr(self, "_rng_clock", None) is None:
+            self._rng_clock = config.TrainingClock()
 
         current_shape = input_shape
-        
         for idx, layer in enumerate(self.layers):
             layer_seed = (self._seed + idx) if self._seed is not None else None
-            
             # Unconditionally build and propagate shape
             try:
                 current_shape = layer.build(current_shape, seed=layer_seed)
             except TypeError:
                 current_shape = layer.build(current_shape)
 
-            # Stochastic layers (e.g. Dropout RNG stream) rebind if needed
-            if hasattr(layer, "_set_seed"):
-                if layer.seed is None and layer_seed is not None:
-                    layer._set_seed(layer_seed)
+            # Stochastic layers derive a per-stream key from the model seed and their
+            # position in the graph, and share the model-wide step counter.
+            if layer.is_stochastic:
+                layer._bind_rng(
+                    base_seed=self._seed,
+                    stream_id=idx,
+                    clock=self._rng_clock,
+                )
+
+        self._stochastic_layers = [layer for layer in self.layers if layer.is_stochastic]
 
         self.trainable_layers = [
             layer for layer in self.layers
@@ -504,7 +515,7 @@ class Model():
         accuracy = self.accuracy
         optimizer_obj = self.optimizer
         step_optimizer = self._step_optimizer
-
+        advance_rng = self._rng_clock.advance
         has_reg = hasattr(loss, "regularization_loss") and any(
             getattr(layer, "weight_regularizer_l1", 0.0) > 0.0
             or getattr(layer, "weight_regularizer_l2", 0.0) > 0.0
@@ -516,6 +527,7 @@ class Model():
 
         if has_reg:
             def run_step(batch_X, batch_y):
+                advance_rng()
                 out = forward_fn(batch_X, training=True)
                 data_l = loss.calculate(out, batch_y)
                 reg_l = reg_loss_fn()
@@ -526,6 +538,7 @@ class Model():
                 return data_l, reg_l, acc_l
         else:
             def run_step(batch_X, batch_y):
+                advance_rng
                 out = forward_fn(batch_X, training=True)
                 data_l = loss.calculate(out, batch_y)
                 acc_l = accuracy.calculate(out, batch_y)
